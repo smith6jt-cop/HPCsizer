@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""hpg — Main CLI entry point for HPCsizer v2.
+
+Commands
+--------
+hpg submit <script.sbatch>         Analyze, recommend, confirm, submit with monitoring
+hpg interactive [rstudio|jupyter|vscode]  Launch interactive session with monitoring
+hpg recommend <script.sbatch>      Print recommendation without submitting
+hpg report [--user USER] [--days N]  Group efficiency report
+hpg history [--user USER] [--tool TOOL]  Per-application distributional summaries
+hpg plot <job_id>                  Multi-panel time-series plot
+hpg flags [--days N]               List anomaly-flagged jobs
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Allow importing lib from parent directory
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    import click
+except ImportError:
+    sys.exit("ERROR: 'click' is required. Install it with: pip install click")
+
+from lib.analyzer import analyze_script
+from lib.recommender import recommend
+from lib.db import init_db, query_jobs, get_job
+
+_REPO_ROOT = Path(__file__).parent.parent
+_DEFAULT_DB = os.environ.get("HPCSIZER_DB", str(_REPO_ROOT / "profiles.db"))
+_DEFAULT_TS_DIR = str(_REPO_ROOT / "timeseries")
+_DEFAULT_PLOTS_DIR = str(_REPO_ROOT / "plots")
+_MONITOR_PY = str(Path(__file__).parent / "monitor.py")
+_FINALIZE_PY = str(Path(__file__).parent / "finalize.py")
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def _ensure_db() -> None:
+    init_db(_DEFAULT_DB)
+
+
+def _format_mem(gb: Optional[float]) -> str:
+    if gb is None:
+        return "unknown"
+    if gb >= 1:
+        return f"{gb:.1f}GB"
+    return f"{gb*1024:.0f}MB"
+
+
+def _print_recommendation(meta: Dict[str, Any], rec: Dict[str, Any]) -> None:
+    click.echo("\n" + "=" * 60)
+    click.echo("  HPCsizer Resource Recommendation")
+    click.echo("=" * 60)
+    click.echo(f"  Script       : {meta.get('script_path', 'N/A')}")
+    click.echo(f"  Language     : {meta.get('language', 'unknown')}")
+    click.echo(f"  Tools found  : {', '.join(meta.get('static_tools', [])) or 'none'}")
+    click.echo(f"  Input data   : {_format_mem(meta.get('total_input_gb', 0))}")
+    click.echo("")
+    click.echo(f"  Recommended Memory : {_format_mem(rec['mem_gb'])}")
+    click.echo(f"  Recommended CPUs   : {rec['cpus']}")
+    if rec.get("req_gpus"):
+        click.echo(f"  Recommended GPUs   : {rec['req_gpus']}")
+    click.echo(f"  Source             : {rec['source']} (n={rec.get('samples', 0)})")
+    if rec.get("r_squared") is not None:
+        click.echo(f"  Model R²           : {rec['r_squared']:.3f}")
+    click.echo("")
+    click.echo(f"  Current request    : {_format_mem(meta.get('req_mem_gb'))} mem, "
+               f"{meta.get('req_cpus', 1)} CPUs")
+    click.echo("=" * 60 + "\n")
+
+
+def _inject_sidecar(script_text: str, job_id_var: str, ts_path: str, context_path: str) -> str:
+    """Return script text with sidecar monitor injected."""
+    python_bin = sys.executable
+    monitor_launch = (
+        f"\n# --- HPCsizer sidecar monitor (injected) ---\n"
+        f"HPG_JOB_ID=${{SLURM_JOB_ID}}\n"
+        f"HPG_TS_PATH=\"{ts_path}/${{HPG_JOB_ID}}.csv.gz\"\n"
+        f"mkdir -p \"{ts_path}\"\n"
+        f"{python_bin} {_MONITOR_PY} ${{HPG_JOB_ID}} ${{HPG_TS_PATH}} &\n"
+        f"HPG_MONITOR_PID=$!\n"
+        f"trap 'kill $HPG_MONITOR_PID 2>/dev/null; "
+        f"{python_bin} {_FINALIZE_PY} ${{HPG_JOB_ID}} "
+        f"--db {_DEFAULT_DB} --ts-dir {ts_path} --context {context_path}' EXIT\n"
+        f"# --- end HPCsizer injection ---\n"
+    )
+    # Insert after the last #SBATCH line
+    lines = script_text.splitlines(keepends=True)
+    last_sbatch = -1
+    for i, line in enumerate(lines):
+        if line.startswith("#SBATCH"):
+            last_sbatch = i
+    if last_sbatch >= 0:
+        lines.insert(last_sbatch + 1, monitor_launch)
+    else:
+        # Insert after shebang
+        lines.insert(1 if lines and lines[0].startswith("#!") else 0, monitor_launch)
+    return "".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CLI group
+# ---------------------------------------------------------------------------
+
+@click.group()
+def cli() -> None:
+    """HPCsizer — Automated SLURM Job Profiling and Resource Sizing."""
+    pass
+
+
+# ---------------------------------------------------------------------------
+# hpg submit
+# ---------------------------------------------------------------------------
+
+@cli.command("submit")
+@click.argument("script", type=click.Path(exists=True))
+@click.option("--yes", "-y", is_flag=True, help="Submit without confirmation")
+@click.option("--as-is", is_flag=True, help="Submit with original resource requests")
+def submit(script: str, yes: bool, as_is: bool) -> None:
+    """Analyze SCRIPT, recommend resources, then submit with monitoring."""
+    _ensure_db()
+    meta = analyze_script(script)
+    rec = recommend(
+        meta["static_tools"],
+        meta.get("total_input_gb", 0),
+        meta.get("req_cpus", 1),
+        meta.get("req_gpus", 0),
+        db_path=_DEFAULT_DB,
+    )
+    _print_recommendation(meta, rec)
+
+    if not as_is:
+        if not yes:
+            choice = click.prompt(
+                "Submit with recommended resources? [y]es / [n]o (submit as-is) / [q]uit",
+                default="y",
+            ).strip().lower()
+            if choice == "q":
+                click.echo("Aborted.")
+                return
+            use_rec = choice != "n"
+        else:
+            use_rec = True
+    else:
+        use_rec = False
+
+    # Write the (possibly modified) script to a temp file
+    script_text = Path(script).read_text(errors="replace")
+    if use_rec:
+        script_text = _apply_recommendations(script_text, rec)
+
+    # Write static context to a temp file for finalize.py
+    ctx_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, dir="/tmp"
+    )
+    json.dump(
+        {
+            "static_tools": meta["static_tools"],
+            "input_files": meta["input_files"],
+            "script_hash": meta["script_hash"],
+        },
+        ctx_file,
+    )
+    ctx_file.flush()
+    ctx_file.close()
+
+    # Inject sidecar
+    modified = _inject_sidecar(script_text, "SLURM_JOB_ID", _DEFAULT_TS_DIR, ctx_file.name)
+    tmp_script = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sbatch", delete=False, dir="/tmp"
+    )
+    tmp_script.write(modified)
+    tmp_script.flush()
+    tmp_script.close()
+
+    click.echo(f"Submitting job...")
+    result = subprocess.run(["sbatch", tmp_script.name], capture_output=False)
+    sys.exit(result.returncode)
+
+
+def _apply_recommendations(script_text: str, rec: Dict[str, Any]) -> str:
+    """Overwrite #SBATCH --mem and --cpus-per-task with recommended values."""
+    import re
+    mem_str = f"{rec['mem_gb']:.0f}G"
+    script_text = re.sub(
+        r"(#SBATCH\s+--mem(?:-per-cpu)?=)\S+",
+        f"#SBATCH --mem={mem_str}",
+        script_text,
+    )
+    script_text = re.sub(
+        r"(#SBATCH\s+--cpus-per-task=)\d+",
+        f"#SBATCH --cpus-per-task={rec['cpus']}",
+        script_text,
+    )
+    return script_text
+
+
+# ---------------------------------------------------------------------------
+# hpg recommend
+# ---------------------------------------------------------------------------
+
+@cli.command("recommend")
+@click.argument("script", type=click.Path(exists=True))
+def recommend_cmd(script: str) -> None:
+    """Print resource recommendation for SCRIPT without submitting."""
+    _ensure_db()
+    meta = analyze_script(script)
+    rec = recommend(
+        meta["static_tools"],
+        meta.get("total_input_gb", 0),
+        meta.get("req_cpus", 1),
+        meta.get("req_gpus", 0),
+        db_path=_DEFAULT_DB,
+    )
+    _print_recommendation(meta, rec)
+
+
+# ---------------------------------------------------------------------------
+# hpg interactive
+# ---------------------------------------------------------------------------
+
+@cli.command("interactive")
+@click.argument("session_type", default="bash", type=click.Choice(["rstudio", "jupyter", "vscode", "bash"]))
+@click.option("--time", "walltime", default="04:00:00", help="Wall time (HH:MM:SS)")
+@click.option("--mem", default="16GB", help="Memory request")
+@click.option("--cpus", default=4, help="CPU count")
+def interactive(session_type: str, walltime: str, mem: str, cpus: int) -> None:
+    """Launch an interactive session with monitoring."""
+    click.echo(f"Launching {session_type} interactive session ({mem} mem, {cpus} CPUs, {walltime})...")
+    click.echo("(Tip: Use 'hpg report' after your session to see resource usage.)")
+
+    sbatch_lines = [
+        "#!/bin/bash",
+        f"#SBATCH --job-name=hpg-interactive-{session_type}",
+        f"#SBATCH --time={walltime}",
+        f"#SBATCH --mem={mem}",
+        f"#SBATCH --cpus-per-task={cpus}",
+    ]
+    if session_type == "rstudio":
+        sbatch_lines.append("module load rstudio\nrstudio-server start")
+    elif session_type == "jupyter":
+        sbatch_lines.append("jupyter lab --no-browser")
+    elif session_type == "vscode":
+        sbatch_lines.append("code-server --bind-addr 0.0.0.0:8888")
+    else:
+        sbatch_lines.append("bash --login")
+
+    script_text = "\n".join(sbatch_lines)
+    ctx_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, dir="/tmp"
+    )
+    json.dump({"static_tools": [session_type], "input_files": []}, ctx_file)
+    ctx_file.flush()
+    ctx_file.close()
+
+    modified = _inject_sidecar(script_text, "SLURM_JOB_ID", _DEFAULT_TS_DIR, ctx_file.name)
+    tmp_script = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sbatch", delete=False, dir="/tmp"
+    )
+    tmp_script.write(modified)
+    tmp_script.flush()
+    tmp_script.close()
+
+    result = subprocess.run(["sbatch", tmp_script.name])
+    sys.exit(result.returncode)
+
+
+# ---------------------------------------------------------------------------
+# hpg report
+# ---------------------------------------------------------------------------
+
+@cli.command("report")
+@click.option("--user", default=None, help="Filter to a specific user")
+@click.option("--days", default=30, show_default=True, help="Days of history to include")
+def report(user: Optional[str], days: int) -> None:
+    """Group efficiency report with anomaly flags."""
+    _ensure_db()
+    jobs = query_jobs(user=user, days=days, db_path=_DEFAULT_DB)
+    if not jobs:
+        click.echo(f"No jobs found in the last {days} days.")
+        return
+
+    # Aggregate
+    total = len(jobs)
+    flagged = [j for j in jobs if j.get("flags") and json.loads(j["flags"] or "[]")]
+    oom = [j for j in jobs if "oom_killed" in (j.get("flags") or "")]
+    mem_effs = [j["mem_efficiency"] for j in jobs if j.get("mem_efficiency") is not None]
+    cpu_effs = [j["cpu_efficiency"] for j in jobs if j.get("cpu_efficiency") is not None]
+    wastes = [j["waste_gb"] for j in jobs if j.get("waste_gb") is not None]
+
+    avg_mem_eff = sum(mem_effs) / len(mem_effs) * 100 if mem_effs else 0
+    avg_cpu_eff = sum(cpu_effs) / len(cpu_effs) * 100 if cpu_effs else 0
+    total_waste = sum(wastes)
+
+    click.echo("\n" + "=" * 60)
+    click.echo("  HPCsizer Group Efficiency Report")
+    click.echo(f"  Period: last {days} days" + (f"  User: {user}" if user else ""))
+    click.echo("=" * 60)
+    click.echo(f"  Total jobs           : {total}")
+    click.echo(f"  Flagged jobs         : {len(flagged)} ({100*len(flagged)/total:.1f}%)")
+    click.echo(f"  OOM-killed jobs      : {len(oom)}")
+    click.echo(f"  Avg memory efficiency: {avg_mem_eff:.1f}%")
+    click.echo(f"  Avg CPU efficiency   : {avg_cpu_eff:.1f}%")
+    click.echo(f"  Est. wasted GB total : {total_waste:.1f} GB")
+    click.echo("")
+
+    # Per-user breakdown
+    users: Dict[str, List[Dict[str, Any]]] = {}
+    for j in jobs:
+        u = j.get("user") or "unknown"
+        users.setdefault(u, []).append(j)
+
+    click.echo("  Per-user breakdown:")
+    click.echo(f"  {'User':<20} {'Jobs':>6} {'Flags':>6} {'MemEff%':>8} {'Waste GB':>10}")
+    click.echo("  " + "-" * 54)
+    for u, ujobs in sorted(users.items()):
+        uflagged = sum(1 for j in ujobs if j.get("flags") and json.loads(j.get("flags") or "[]"))
+        umes = [j["mem_efficiency"] for j in ujobs if j.get("mem_efficiency") is not None]
+        ueff = sum(umes) / len(umes) * 100 if umes else 0
+        uwaste = sum(j["waste_gb"] for j in ujobs if j.get("waste_gb") is not None)
+        click.echo(f"  {u:<20} {len(ujobs):>6} {uflagged:>6} {ueff:>8.1f} {uwaste:>10.1f}")
+
+    # Anomaly summary
+    if flagged:
+        all_flags: Dict[str, int] = {}
+        for j in flagged:
+            for flag in json.loads(j.get("flags") or "[]"):
+                all_flags[flag] = all_flags.get(flag, 0) + 1
+        click.echo("\n  Anomaly flags:")
+        for flag, count in sorted(all_flags.items(), key=lambda x: -x[1]):
+            click.echo(f"    {flag:<30} {count:>4} ({100*count/total:.1f}%)")
+
+    click.echo("=" * 60 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# hpg history
+# ---------------------------------------------------------------------------
+
+@cli.command("history")
+@click.option("--user", default=None, help="Filter to a specific user")
+@click.option("--tool", default=None, help="Filter to a specific tool")
+@click.option("--days", default=90, show_default=True, help="Days of history")
+def history(user: Optional[str], tool: Optional[str], days: int) -> None:
+    """Per-application distributional summaries."""
+    _ensure_db()
+    jobs = query_jobs(user=user, tool=tool, days=days, db_path=_DEFAULT_DB)
+    if not jobs:
+        click.echo("No jobs found.")
+        return
+
+    label = tool if tool else "all tools"
+    click.echo(f"\nHistorical summary for {label} ({len(jobs)} jobs, last {days} days):\n")
+
+    def _hist(vals: List[float], label: str) -> None:
+        if not vals:
+            click.echo(f"  {label}: no data")
+            return
+        vals_s = sorted(vals)
+        n = len(vals_s)
+        p = lambda pct: vals_s[min(int(pct / 100 * n), n - 1)]
+        click.echo(
+            f"  {label}: "
+            f"min={p(0):.2f}  p25={p(25):.2f}  median={p(50):.2f}  "
+            f"p75={p(75):.2f}  p90={p(90):.2f}  max={p(100):.2f}"
+        )
+
+    runtimes = [j["sacct_elapsed_sec"] / 3600 for j in jobs if j.get("sacct_elapsed_sec")]
+    mems = [j.get("sidecar_peak_gb") or j.get("sacct_peak_rss_gb") for j in jobs]
+    mems = [m for m in mems if m is not None]
+    cpu_effs = [j["cpu_efficiency"] * 100 for j in jobs if j.get("cpu_efficiency") is not None]
+    mem_effs = [j["mem_efficiency"] * 100 for j in jobs if j.get("mem_efficiency") is not None]
+    inputs = [j.get("total_input_gb") for j in jobs if j.get("total_input_gb")]
+    inputs_clean = [i for i in inputs if i is not None and i > 0]
+
+    _hist(runtimes, "Runtime (hrs)      ")
+    _hist(mems, "Peak memory (GB)   ")
+    _hist(cpu_effs, "CPU efficiency (%) ")
+    _hist(mem_effs, "Mem efficiency (%) ")
+    _hist(inputs_clean, "Input size (GB)    ")
+    click.echo()
+
+
+# ---------------------------------------------------------------------------
+# hpg plot
+# ---------------------------------------------------------------------------
+
+@cli.command("plot")
+@click.argument("job_id")
+@click.option("--output-dir", default=_DEFAULT_PLOTS_DIR, help="Output directory for PNGs")
+def plot(job_id: str, output_dir: str) -> None:
+    """Generate a multi-panel time-series plot for JOB_ID."""
+    _ensure_db()
+    try:
+        from lib.plotter import plot_job
+    except ImportError as exc:
+        click.echo(f"ERROR: {exc}")
+        sys.exit(1)
+
+    job_meta = get_job(job_id, db_path=_DEFAULT_DB)
+    out = plot_job(
+        job_id,
+        timeseries_dir=_DEFAULT_TS_DIR,
+        output_dir=output_dir,
+        job_meta=job_meta,
+    )
+    if out:
+        click.echo(f"Plot saved: {out}")
+    else:
+        click.echo(f"No time-series data found for job {job_id}.")
+
+
+# ---------------------------------------------------------------------------
+# hpg flags
+# ---------------------------------------------------------------------------
+
+@cli.command("flags")
+@click.option("--days", default=30, show_default=True, help="Days of history")
+@click.option("--user", default=None, help="Filter to user")
+def flags(days: int, user: Optional[str]) -> None:
+    """List all anomaly-flagged jobs."""
+    _ensure_db()
+    jobs = query_jobs(user=user, days=days, db_path=_DEFAULT_DB)
+    flagged = [
+        j for j in jobs
+        if j.get("flags") and json.loads(j.get("flags") or "[]")
+    ]
+    if not flagged:
+        click.echo("No anomaly-flagged jobs found.")
+        return
+
+    click.echo(f"\n{'Job ID':<16} {'User':<16} {'Flags'}")
+    click.echo("-" * 70)
+    for j in flagged:
+        flag_list = json.loads(j.get("flags") or "[]")
+        click.echo(f"{j['job_id']:<16} {(j.get('user') or 'unknown'):<16} {', '.join(flag_list)}")
+    click.echo()
+
+
+if __name__ == "__main__":
+    cli()

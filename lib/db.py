@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, List
 
 DEFAULT_DB_PATH = os.environ.get(
     "HPCSIZER_DB",
-    str(Path(__file__).parent.parent / "profiles.db"),
+    str(Path(__file__).resolve().parent.parent / "profiles.db"),
 )
 
 

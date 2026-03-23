@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # harvest.sh — sacct harvester for HPCsizer.
 #
-# Queries sacct for group jobs completed in the last 20 minutes and
-# upserts them into the profile database.
+# Queries sacct for group jobs completed in the last 20 minutes, merges
+# .batch MaxRSS with parent lines, and upserts them into the profile database.
 #
 # Called every 15 minutes by scheduler.sh (self-resubmitting SLURM job).
 #
@@ -45,7 +45,6 @@ sacct --noheader --parsable2 \
     ${ACCT_FLAG} \
     -S "${START_TIME}" \
     -o "${FIELDS}" \
-    -X \
 | "$PYTHON" - <<'PYEOF'
 import sys, os, json, re
 sys.path.insert(0, os.environ.get("PYTHONPATH", "").split(":")[0])
@@ -83,7 +82,9 @@ def parse_gpus(tres):
     m = re.search(r"gres/gpu(?::\w+)?=(\d+)", tres or "")
     return int(m.group(1)) if m else 0
 
-count = 0
+# Two-pass: collect parent lines, then merge .batch MaxRSS
+parents = {}
+batch_rss = {}
 for line in sys.stdin:
     line = line.strip()
     if not line or line.startswith("---"):
@@ -91,18 +92,45 @@ for line in sys.stdin:
     parts = line.split("|")
     data = dict(zip(FIELDS, parts + [""]*(max(0, len(FIELDS)-len(parts)))))
     job_id = data.get("JobID","").strip()
-    if not job_id or "." in job_id:
+    if not job_id:
         continue
+    if ".batch" in job_id:
+        parent_id = job_id.split(".")[0]
+        rss = parse_mem(data.get("MaxRSS",""))
+        if rss is not None:
+            batch_rss[parent_id] = rss
+    elif ".extern" in job_id:
+        continue
+    elif "." not in job_id:
+        state = data.get("State","").strip()
+        if state in ("RUNNING","PENDING"):
+            continue
+        parents[job_id] = data
+
+count = 0
+for job_id, data in parents.items():
     state = data.get("State","").strip()
     if state not in ("COMPLETED","FAILED","TIMEOUT","CANCELLED","OUT_OF_MEMORY"):
         continue
     elapsed_sec = parse_elapsed(data.get("Elapsed",""))
     cpu_time_sec = parse_elapsed(data.get("TotalCPU",""))
     req_mem_gb = parse_mem(data.get("ReqMem",""))
-    rss_gb = parse_mem(data.get("MaxRSS",""))
-    cpu_eff = (cpu_time_sec / (elapsed_sec * int(data.get("NCPUS",1) or 1))
-               if elapsed_sec and data.get("NCPUS") else None)
+    ncpus = int(data.get("NCPUS",1) or 1)
+    # Prefer .batch MaxRSS over parent line
+    rss_gb = batch_rss.get(job_id) or parse_mem(data.get("MaxRSS",""))
+    cpu_eff = (cpu_time_sec / (elapsed_sec * ncpus)
+               if elapsed_sec and ncpus else None)
+    mem_eff = (rss_gb / req_mem_gb if rss_gb and req_mem_gb else None)
     waste_gb = max(req_mem_gb - (rss_gb or 0), 0) if req_mem_gb else None
+    flags = []
+    if state == "OUT_OF_MEMORY":
+        flags.append("oom_killed")
+    if mem_eff is not None and mem_eff < 0.25:
+        flags.append("mem_overrequest")
+    if cpu_eff is not None and cpu_eff < 0.05:
+        flags.append("idle_cpu")
+    if ncpus > 2 and cpu_eff is not None and cpu_eff < (1.5 / ncpus):
+        flags.append("single_threaded")
     job = {
         "job_id": job_id,
         "user": data.get("User",""),
@@ -114,20 +142,20 @@ for line in sys.stdin:
         "start_time": data.get("Start",""),
         "end_time": data.get("End",""),
         "req_mem_gb": req_mem_gb,
-        "req_cpus": int(data.get("NCPUS",1) or 1),
+        "req_cpus": ncpus,
         "req_gpus": parse_gpus(data.get("ReqTRES","")),
         "sacct_peak_rss_gb": rss_gb,
         "sacct_elapsed_sec": elapsed_sec,
         "sacct_cpu_time_sec": cpu_time_sec,
         "cpu_efficiency": cpu_eff,
         "waste_gb": waste_gb,
-        "mem_efficiency": (rss_gb / req_mem_gb if rss_gb and req_mem_gb else None),
-        "flags": json.dumps(["oom_killed"] if state == "OUT_OF_MEMORY" else []),
+        "mem_efficiency": mem_eff,
+        "flags": json.dumps(flags),
     }
     insert_job(job, db_path=DB_PATH)
     count += 1
 
-print(f"[harvest] Upserted {count} jobs.")
+print(f"[harvest] Upserted {count} jobs ({len(batch_rss)} had .batch MaxRSS).")
 PYEOF
 
 echo "[harvest] Done."

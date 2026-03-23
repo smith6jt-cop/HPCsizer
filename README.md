@@ -22,6 +22,11 @@ and CPU requests.
   `single_threaded` anomaly flags.
 * Tests: added cases for typed GPUs, `--mem-per-cpu`, `/home` paths, `/red`
   paths.
+* `bin/validate.py` added: replaces manual `mkdir`/`sqlite3` commands from the
+  old steps 2–3 so environment variables (`HPCSIZER_DB`, etc.) are now set in
+  the step *after* validation and testing, not before.
+* `harvest.sh`: removed `-X` flag and added two-pass parent + `.batch` merge
+  (same approach as `backfill.py`) so ongoing harvests now capture MaxRSS.
 
 ---
 
@@ -70,15 +75,15 @@ export HPCSIZER_ROOT="<GROUP_DIR>/hpg-sizer"
 
 ```bash
 sacct -S "$(date -d '-30 days' +%Y-%m-%d)" -a -A "$HPCSIZER_ACCT" \
-  --noheader --parsable2 -X \
+  --noheader --parsable2 \
   -o JobID,User,JobName,State,ReqMem,MaxRSS,Elapsed | head -10
 ```
 
 If that returns data, proceed.
 
-> **Note:** `-X` returns parent job lines only. `MaxRSS` will be empty on most
-> parent lines because sacct only populates it on `.batch` step lines. This is a
-> known limitation of `harvest.sh` that needs a future fix (see step 5).
+> **Note:** Without `-X`, sacct returns both parent and `.batch` step lines.
+> `MaxRSS` is populated on the `.batch` lines; `harvest.sh` and `backfill.py`
+> both use a two-pass merge to capture it.
 
 ### 5. Backfill historical data
 
@@ -171,12 +176,8 @@ cat logs/harvest.log
 > adjusted or removed depending on your cluster's available QOS tiers. Edit
 > the `#SBATCH --qos` line if the job is rejected.
 
-> **Note:** `harvest.sh` still uses `-X`, so ongoing harvests won't capture
-> `.batch` MaxRSS. The same two-pass parent+batch merge logic from the backfill
-> script should eventually be incorporated into `harvest.sh`. For now the
-> backfill covers historical data, and `finalize.py` (called by the sidecar
-> monitor) does its own sacct query without `-X`, so jobs submitted through
-> `hpg submit` will have correct MaxRSS.
+> **Note:** `harvest.sh` now queries without `-X` and merges `.batch` MaxRSS,
+> matching the approach used by `backfill.py` and `finalize.py`.
 
 ### 9. Persist environment variables
 

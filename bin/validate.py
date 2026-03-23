@@ -42,10 +42,7 @@ def check_db(db_path):
     init_db(db_path)
     conn = sqlite3.connect(db_path)
     tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
     missing = EXPECTED_TABLES - tables
     if missing:
@@ -73,7 +70,7 @@ def check_db_contents(db_path):
     # Per-user summary
     print("\n  Per-user summary:")
     print(f"  {'user':<16} {'count':>6} {'avg_mem_eff':>12} {'has_rss':>8}")
-    print(f"  {'-'*16} {'-'*6} {'-'*12} {'-'*8}")
+    print(f"  {'-' * 16} {'-' * 6} {'-' * 12} {'-' * 8}")
     for row in conn.execute(
         """SELECT user, count(*) as cnt,
                   round(avg(mem_efficiency), 3) as avg_mem_eff,

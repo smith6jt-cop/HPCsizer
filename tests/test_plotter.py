@@ -5,6 +5,7 @@ import gzip
 import os
 import sys
 from pathlib import Path
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -13,8 +14,7 @@ from lib.plotter import load_timeseries, plot_job
 
 
 def _write_ts(path: str, rows: list) -> None:
-    fieldnames = ["elapsed_sec", "rss_gb", "cpu_frac", "io_read_mb_s",
-                  "threads", "numa_miss_rate"]
+    fieldnames = ["elapsed_sec", "rss_gb", "cpu_frac", "io_read_mb_s", "threads", "numa_miss_rate"]
     with gzip.open(path, "wt", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
@@ -24,8 +24,14 @@ def _write_ts(path: str, rows: list) -> None:
 @pytest.fixture
 def sample_ts(tmp_path):
     rows = [
-        {"elapsed_sec": i * 30, "rss_gb": 10.0 + i * 0.1, "cpu_frac": 0.6,
-         "io_read_mb_s": 5.0, "threads": 4, "numa_miss_rate": 0.01}
+        {
+            "elapsed_sec": i * 30,
+            "rss_gb": 10.0 + i * 0.1,
+            "cpu_frac": 0.6,
+            "io_read_mb_s": 5.0,
+            "threads": 4,
+            "numa_miss_rate": 0.01,
+        }
         for i in range(50)
     ]
     ts_path = str(tmp_path / "12345.csv.gz")
@@ -46,8 +52,16 @@ class TestLoadTimeseries:
         assert isinstance(loaded[0]["elapsed_sec"], float)
 
     def test_none_for_empty_values(self, tmp_path):
-        rows = [{"elapsed_sec": 0, "rss_gb": "", "cpu_frac": 0.5,
-                 "io_read_mb_s": 0, "threads": 4, "numa_miss_rate": 0}]
+        rows = [
+            {
+                "elapsed_sec": 0,
+                "rss_gb": "",
+                "cpu_frac": 0.5,
+                "io_read_mb_s": 0,
+                "threads": 4,
+                "numa_miss_rate": 0,
+            }
+        ]
         ts_path = str(tmp_path / "empty_val.csv.gz")
         _write_ts(ts_path, rows)
         loaded = load_timeseries(ts_path)

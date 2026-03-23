@@ -10,29 +10,28 @@ from typing import Any, Dict, List, Optional
 
 from lib.db import get_tool_model, query_jobs
 
-
 # ---------------------------------------------------------------------------
 # Cold-start heuristics
 # ---------------------------------------------------------------------------
 
 # (mem_multiplier, baseline_gb, cpu_hint)
 _COLD_START: Dict[str, tuple] = {
-    "Seurat_readRDS":       (3.0,  0.0,  1),
-    "Seurat_SCTransform":   (4.5,  0.0,  4),   # 3.0 × file + 50%
-    "Seurat_FindMarkers":   (2.5,  0.0,  4),
-    "Seurat":               (3.0,  0.0,  4),
-    "scanpy":               (2.0,  0.0,  4),
-    "anndata":              (2.0,  0.0,  4),
-    "scVI":                 (2.0,  0.0,  4),
-    "QuPath":               (0.0,  2.0,  None),  # 2 GB per core
-    "cellranger":           (0.0, 32.0,  8),
-    "scimap":               (0.0,  0.0,  4),     # computed separately
-    "DESeq2":               (2.0,  4.0,  4),
-    "edgeR":                (1.5,  2.0,  4),
-    "limma":                (1.5,  2.0,  4),
-    "STAR":                 (0.0, 32.0,  8),
-    "salmon":               (0.0, 16.0,  8),
-    "kallisto":             (0.0, 12.0,  4),
+    "Seurat_readRDS": (3.0, 0.0, 1),
+    "Seurat_SCTransform": (4.5, 0.0, 4),  # 3.0 × file + 50%
+    "Seurat_FindMarkers": (2.5, 0.0, 4),
+    "Seurat": (3.0, 0.0, 4),
+    "scanpy": (2.0, 0.0, 4),
+    "anndata": (2.0, 0.0, 4),
+    "scVI": (2.0, 0.0, 4),
+    "QuPath": (0.0, 2.0, None),  # 2 GB per core
+    "cellranger": (0.0, 32.0, 8),
+    "scimap": (0.0, 0.0, 4),  # computed separately
+    "DESeq2": (2.0, 4.0, 4),
+    "edgeR": (1.5, 2.0, 4),
+    "limma": (1.5, 2.0, 4),
+    "STAR": (0.0, 32.0, 8),
+    "salmon": (0.0, 16.0, 8),
+    "kallisto": (0.0, 12.0, 4),
 }
 
 _GENERIC_MULTIPLIER = 2.0
@@ -79,7 +78,6 @@ def _db_recommendation(
     db_path: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return recommendation from historical job data if ≥5 samples exist."""
-    import json
     import statistics
 
     kwargs: Dict[str, Any] = {"days": days}
@@ -89,9 +87,9 @@ def _db_recommendation(
     for tool in tools:
         jobs = query_jobs(tool=tool, **kwargs)
         completed = [
-            j for j in jobs
-            if j.get("state") in ("COMPLETED", "TIMEOUT")
-            and j.get("sidecar_peak_gb") is not None
+            j
+            for j in jobs
+            if j.get("state") in ("COMPLETED", "TIMEOUT") and j.get("sidecar_peak_gb") is not None
         ]
         if len(completed) >= MIN_SAMPLES_DB:
             peaks = [j["sidecar_peak_gb"] for j in completed]
@@ -126,9 +124,7 @@ def _model_recommendation(
     for tool in tools:
         model = get_tool_model(tool, **kwargs)
         if model and model.get("sample_count", 0) >= MIN_SAMPLES_MODEL:
-            mem_gb = (
-                model["mem_per_input_gb"] * total_input_gb + model["baseline_gb"]
-            )
+            mem_gb = model["mem_per_input_gb"] * total_input_gb + model["baseline_gb"]
             return {
                 "mem_gb": mem_gb * 1.10,
                 "cpus": model["optimal_cpus"],

@@ -1,16 +1,14 @@
 """Tests for lib/db.py"""
 
-import json
-import os
-import tempfile
-import pytest
-
 # Use a temp DB for every test
 import sys
 from pathlib import Path
+
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import init_db, insert_job, get_job, query_jobs, upsert_tool_model, get_tool_model
+from lib.db import get_job, get_tool_model, init_db, insert_job, query_jobs, upsert_tool_model
 
 
 @pytest.fixture
@@ -22,8 +20,11 @@ def tmp_db(tmp_path):
 
 def test_init_db_creates_tables(tmp_db):
     import sqlite3
+
     conn = sqlite3.connect(tmp_db)
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
     conn.close()
     assert "jobs" in tables
     assert "tool_models" in tables
@@ -63,8 +64,13 @@ def test_insert_job_replaces_existing(tmp_db):
 def test_query_jobs_user_filter(tmp_db):
     for uid, user in [("1", "alice"), ("2", "bob"), ("3", "alice")]:
         insert_job(
-            {"job_id": uid, "user": user, "state": "COMPLETED",
-             "end_time": "2026-01-01T12:00:00", "flags": []},
+            {
+                "job_id": uid,
+                "user": user,
+                "state": "COMPLETED",
+                "end_time": "2026-01-01T12:00:00",
+                "flags": [],
+            },
             db_path=tmp_db,
         )
     alice_jobs = query_jobs(user="alice", days=365 * 10, db_path=tmp_db)
@@ -89,8 +95,14 @@ def test_upsert_and_get_tool_model(tmp_db):
 
 
 def test_tool_model_upsert_updates(tmp_db):
-    model = {"tool": "scanpy", "mem_per_input_gb": 2.0, "baseline_gb": 1.0,
-             "optimal_cpus": 4, "r_squared": 0.8, "sample_count": 10}
+    model = {
+        "tool": "scanpy",
+        "mem_per_input_gb": 2.0,
+        "baseline_gb": 1.0,
+        "optimal_cpus": 4,
+        "r_squared": 0.8,
+        "sample_count": 10,
+    }
     upsert_tool_model(model, db_path=tmp_db)
     model2 = {**model, "sample_count": 20, "r_squared": 0.92}
     upsert_tool_model(model2, db_path=tmp_db)

@@ -7,12 +7,11 @@ Performs static analysis of an sbatch script to extract:
   - SBATCH resource directives
 """
 
+import hashlib
 import os
 import re
-import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any, Dict, List
 
 # ---------------------------------------------------------------------------
 # SBATCH directive parsing
@@ -240,9 +239,7 @@ def analyze_script(script_path: str) -> Dict[str, Any]:
     input_files = detect_input_files(text)
     directives = parse_sbatch_directives(text)
 
-    total_input_gb = sum(
-        f["size_gb"] for f in input_files if f["size_gb"] is not None
-    )
+    total_input_gb = sum(f["size_gb"] for f in input_files if f["size_gb"] is not None)
 
     return {
         "script_path": str(path.resolve()),

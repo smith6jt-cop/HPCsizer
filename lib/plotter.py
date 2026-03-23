@@ -5,17 +5,16 @@ Generates multi-panel plots inspired by TACC Stats Figure 4.
 
 import csv
 import gzip
-import io
-import json
 import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
+    import matplotlib.pyplot as plt
+
     _HAS_MATPLOTLIB = True
 except ImportError:  # pragma: no cover
     _HAS_MATPLOTLIB = False
@@ -54,8 +53,10 @@ def plot_job(
 
     ts_path_gz = os.path.join(timeseries_dir, f"{job_id}.csv.gz")
     ts_path_plain = os.path.join(timeseries_dir, f"{job_id}.csv")
-    ts_path = ts_path_gz if os.path.exists(ts_path_gz) else (
-        ts_path_plain if os.path.exists(ts_path_plain) else None
+    ts_path = (
+        ts_path_gz
+        if os.path.exists(ts_path_gz)
+        else (ts_path_plain if os.path.exists(ts_path_plain) else None)
     )
     if ts_path is None:
         return None

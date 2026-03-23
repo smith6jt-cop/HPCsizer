@@ -38,7 +38,7 @@ LOOKBACK_MINUTES=20
 START_TIME="$(date -d "-${LOOKBACK_MINUTES} minutes" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
              || date -v "-${LOOKBACK_MINUTES}M" '+%Y-%m-%dT%H:%M:%S')"
 
-FIELDS="JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timelimit,ReqTRES,MaxRSS,Elapsed,CPUTime"
+FIELDS="JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timelimit,ReqTRES,MaxRSS,Elapsed,TotalCPU"
 
 echo "[harvest] $(date -Iseconds): querying sacct since ${START_TIME}"
 
@@ -55,7 +55,7 @@ from lib.db import init_db, insert_job
 DB_PATH = os.environ.get("HPCSIZER_DB", "profiles.db")
 init_db(DB_PATH)
 
-FIELDS = "JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timelimit,ReqTRES,MaxRSS,Elapsed,CPUTime".split(",")
+FIELDS = "JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timelimit,ReqTRES,MaxRSS,Elapsed,TotalCPU".split(",")
 
 def parse_mem(s):
     if not s or s.strip() in ("", "0"):
@@ -98,7 +98,7 @@ for line in sys.stdin:
     if state not in ("COMPLETED","FAILED","TIMEOUT","CANCELLED","OUT_OF_MEMORY"):
         continue
     elapsed_sec = parse_elapsed(data.get("Elapsed",""))
-    cpu_time_sec = parse_elapsed(data.get("CPUTime",""))
+    cpu_time_sec = parse_elapsed(data.get("TotalCPU",""))
     req_mem_gb = parse_mem(data.get("ReqMem",""))
     rss_gb = parse_mem(data.get("MaxRSS",""))
     cpu_eff = (cpu_time_sec / (elapsed_sec * int(data.get("NCPUS",1) or 1))

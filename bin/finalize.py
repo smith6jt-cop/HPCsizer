@@ -39,7 +39,7 @@ _DEFAULT_TS_DIR = str(Path(__file__).parent.parent / "timeseries")
 _SACCT_FIELDS = (
     "JobID,User,JobName,Account,QOS,State,Submit,Start,End,"
     "ReqMem,NCPUS,Timelimit,ReqTRES,"
-    "MaxRSS,Elapsed,CPUTime"
+    "MaxRSS,Elapsed,TotalCPU"
 )
 
 
@@ -124,7 +124,7 @@ def query_sacct(job_id: str) -> Optional[Dict[str, Any]]:
         data = dict(zip(fields, parts + [""] * max(0, len(fields) - len(parts))))
 
     elapsed_sec = _parse_elapsed(data.get("Elapsed", ""))
-    cpu_time_str = data.get("CPUTime", "")
+    cpu_time_str = data.get("TotalCPU", "")
     cpu_time_sec = _parse_elapsed(cpu_time_str) if cpu_time_str else None
     req_mem_gb = _parse_mem_sacct(data.get("ReqMem", ""))
 

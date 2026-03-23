@@ -120,23 +120,26 @@ python bin/hpg flags --days 90
 # Per-tool distributional history
 python bin/hpg history --days 90
 
-# Recommend against a test script
-cat > /tmp/test.sbatch << 'EOF'
-#!/bin/bash
-#SBATCH --job-name=seurat_test
-#SBATCH --mem=256G
-#SBATCH --cpus-per-task=8
-#SBATCH --time=12:00:00
+# Recommend against the bundled test script
+python bin/hpg recommend tests/fixtures/sample_seurat.sbatch
+```
 
-module load R/4.3
-Rscript -e 'library(Seurat); obj <- readRDS("/blue/group/data/test.rds")'
-EOF
+The `recommend` output should detect R as the language and Seurat,
+SCTransform, and FindMarkers as tools. With no sidecar data yet it will
+return cold-start heuristics.
 
+To test input-file detection (and the memory-estimation multipliers), point
+the script at a real dataset on your cluster:
+
+```bash
+cp tests/fixtures/sample_seurat.sbatch /tmp/test.sbatch
+# Append an actual file path so the analyzer can stat and size it
+echo 'Rscript analysis.R /blue/mygroup/data/counts.rds' >> /tmp/test.sbatch
 python bin/hpg recommend /tmp/test.sbatch
 ```
 
-The `recommend` output should detect R as the language, Seurat as a tool, and
-return a cold-start heuristic since there is no sidecar data yet.
+The recommendation should now include an input-size estimate based on the
+`.rds` file size multiplied by 2.5x.
 
 ### 8. Start the scheduler
 

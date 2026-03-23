@@ -2,19 +2,19 @@
 
 import sys
 from pathlib import Path
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.analyzer import (
-    parse_sbatch_directives,
+    analyze_script,
+    detect_input_files,
     detect_language,
     detect_tools,
-    detect_input_files,
+    parse_sbatch_directives,
     script_hash,
-    analyze_script,
 )
-
 
 SAMPLE_R_SCRIPT = """#!/bin/bash
 #SBATCH --job-name=seurat_analysis

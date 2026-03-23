@@ -2,11 +2,12 @@
 
 import sys
 from pathlib import Path
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.flags import detect_flags, compute_efficiency
+from lib.flags import compute_efficiency, detect_flags
 
 
 def _make_job(**kwargs):
@@ -99,8 +100,16 @@ class TestDetectFlags:
         ts = []
         for i in range(n):
             rss = 80.0 if i < 10 else 5.0
-            ts.append({"elapsed_sec": i * 30, "cpu_frac": 0.5, "rss_gb": rss,
-                        "io_read_mb_s": 0, "threads": 4, "numa_miss_rate": 0.0})
+            ts.append(
+                {
+                    "elapsed_sec": i * 30,
+                    "cpu_frac": 0.5,
+                    "rss_gb": rss,
+                    "io_read_mb_s": 0,
+                    "threads": 4,
+                    "numa_miss_rate": 0.0,
+                }
+            )
         job = _make_job()
         flags = detect_flags(job, ts)
         assert "mem_spike_plateau" in flags
@@ -111,8 +120,16 @@ class TestDetectFlags:
         ts = []
         for i in range(n):
             cpu = 0.8 if i < 50 else 0.01
-            ts.append({"elapsed_sec": i * 30, "cpu_frac": cpu, "rss_gb": 20.0,
-                        "io_read_mb_s": 0, "threads": 4, "numa_miss_rate": 0.0})
+            ts.append(
+                {
+                    "elapsed_sec": i * 30,
+                    "cpu_frac": cpu,
+                    "rss_gb": 20.0,
+                    "io_read_mb_s": 0,
+                    "threads": 4,
+                    "numa_miss_rate": 0.0,
+                }
+            )
         job = _make_job()
         flags = detect_flags(job, ts)
         assert "catastrophe" in flags

@@ -3,8 +3,6 @@
 Implements flags described in Section 3.4 of the design document.
 """
 
-import json
-import math
 from typing import Any, Dict, List, Optional
 
 
@@ -14,7 +12,9 @@ def _safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
     return a / b
 
 
-def detect_flags(job: Dict[str, Any], timeseries: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+def detect_flags(
+    job: Dict[str, Any], timeseries: Optional[List[Dict[str, Any]]] = None
+) -> List[str]:
     """Return a list of anomaly flag names for a job record.
 
     Parameters
@@ -63,7 +63,6 @@ def detect_flags(job: Dict[str, Any], timeseries: Optional[List[Dict[str, Any]]]
             early_peak = max(rss_vals[:cutoff])
             late_vals = rss_vals[cutoff:]
             if late_vals:
-                import statistics
                 p95_late = sorted(late_vals)[int(0.95 * len(late_vals))]
                 if early_peak > 0 and p95_late < 0.6 * early_peak:
                     flags.append("mem_spike_plateau")
@@ -71,17 +70,13 @@ def detect_flags(job: Dict[str, Any], timeseries: Optional[List[Dict[str, Any]]]
         # io_dominant: majority of wall time in high I/O with low CPU
         io_rates = [r.get("io_read_mb_s", 0) or 0 for r in timeseries]
         if io_rates and cpu_fracs:
-            high_io = sum(
-                1 for io, cpu in zip(io_rates, cpu_fracs)
-                if io > 10 and cpu < 0.10
-            )
+            high_io = sum(1 for io, cpu in zip(io_rates, cpu_fracs) if io > 10 and cpu < 0.10)
             if high_io / len(timeseries) > 0.50:
                 flags.append("io_dominant")
 
         # numa_misplaced
         numa_rates = [
-            r.get("numa_miss_rate") for r in timeseries
-            if r.get("numa_miss_rate") is not None
+            r.get("numa_miss_rate") for r in timeseries if r.get("numa_miss_rate") is not None
         ]
         if numa_rates:
             avg_numa = sum(numa_rates) / len(numa_rates)

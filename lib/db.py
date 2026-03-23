@@ -3,11 +3,11 @@
 Uses SQLite with WAL mode stored on shared group storage.
 """
 
-import sqlite3
-import os
 import json
+import os
+import sqlite3
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 DEFAULT_DB_PATH = os.environ.get(
     "HPCSIZER_DB",
@@ -152,14 +152,10 @@ def query_jobs(
     return [dict(r) for r in rows]
 
 
-def get_tool_model(
-    tool: str, db_path: str = DEFAULT_DB_PATH
-) -> Optional[Dict[str, Any]]:
+def get_tool_model(tool: str, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
     """Fetch regression model for a tool."""
     conn = get_connection(db_path)
-    row = conn.execute(
-        "SELECT * FROM tool_models WHERE tool = ?", (tool,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM tool_models WHERE tool = ?", (tool,)).fetchone()
     conn.close()
     return dict(row) if row else None
 

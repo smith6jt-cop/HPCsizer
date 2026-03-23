@@ -38,9 +38,7 @@ def parse_mem(s):
         n = float(s[:-1] if s[-1] in "KMGTkmgt" else s)
     except ValueError:
         return None
-    return n * {"K": 1 / 1048576, "M": 1 / 1024, "G": 1.0, "T": 1024.0}.get(
-        suffix, 1 / 1024
-    )
+    return n * {"K": 1 / 1048576, "M": 1 / 1024, "G": 1.0, "T": 1024.0}.get(suffix, 1 / 1024)
 
 
 def parse_elapsed(t):
@@ -73,17 +71,23 @@ def main():
     db = os.environ.get("HPCSIZER_DB")
     acct = os.environ.get("HPCSIZER_ACCT")
     if not db or not acct:
-        print(
-            "Error: HPCSIZER_DB and HPCSIZER_ACCT must be set.", file=sys.stderr
-        )
+        print("Error: HPCSIZER_DB and HPCSIZER_ACCT must be set.", file=sys.stderr)
         sys.exit(1)
 
     init_db(db)
 
     result = subprocess.run(
         [
-            "sacct", "-S", args.since, "-a", "-A", acct,
-            "--noheader", "--parsable2", "-o", FIELDS,
+            "sacct",
+            "-S",
+            args.since,
+            "-a",
+            "-A",
+            acct,
+            "--noheader",
+            "--parsable2",
+            "-o",
+            FIELDS,
         ],
         capture_output=True,
         text=True,
@@ -128,9 +132,7 @@ def main():
         # Prefer .batch MaxRSS over parent line
         rss_gb = batch_rss.get(job_id) or parse_mem(data.get("MaxRSS", ""))
 
-        cpu_eff = (
-            (cpu_time_sec / (elapsed_sec * ncpus)) if elapsed_sec and ncpus else None
-        )
+        cpu_eff = (cpu_time_sec / (elapsed_sec * ncpus)) if elapsed_sec and ncpus else None
         mem_eff = (rss_gb / req_mem_gb) if rss_gb and req_mem_gb else None
         waste = max(req_mem_gb - (rss_gb or 0), 0) if req_mem_gb else None
 

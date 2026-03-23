@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional
 # Allow importing lib from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import init_db, insert_job, get_job
-from lib.flags import detect_flags, compute_efficiency
+from lib.db import init_db, insert_job
+from lib.flags import compute_efficiency, detect_flags
 from lib.plotter import load_timeseries
 
 _DEFAULT_DB = os.environ.get(
@@ -77,6 +77,7 @@ def _parse_elapsed(t: str) -> int:
     """Parse D-HH:MM:SS or HH:MM:SS to seconds."""
     t = t.strip()
     import re
+
     m = re.match(r"(\d+)-(\d+):(\d+):(\d+)", t)
     if m:
         d, h, mi, s = (int(x) for x in m.groups())
@@ -91,6 +92,7 @@ def _parse_elapsed(t: str) -> int:
 def _parse_gpus(tres_str: str) -> int:
     """Extract GPU count from TRES string like 'gres/gpu=1'."""
     import re
+
     m = re.search(r"gres/gpu(?::\w+)?=(\d+)", tres_str or "")
     return int(m.group(1)) if m else 0
 
@@ -99,9 +101,13 @@ def query_sacct(job_id: str) -> Optional[Dict[str, Any]]:
     """Query sacct and return a partial job dict."""
     result = subprocess.run(
         [
-            "sacct", "-j", job_id,
-            "--noheader", "--parsable2",
-            "-o", _SACCT_FIELDS,
+            "sacct",
+            "-j",
+            job_id,
+            "--noheader",
+            "--parsable2",
+            "-o",
+            _SACCT_FIELDS,
         ],
         capture_output=True,
         text=True,
@@ -151,6 +157,7 @@ def query_sacct(job_id: str) -> Optional[Dict[str, Any]]:
 # Time-series summary
 # ---------------------------------------------------------------------------
 
+
 def _summarize_timeseries(
     rows: List[Dict[str, Any]],
 ) -> Dict[str, Optional[float]]:
@@ -181,6 +188,7 @@ def _summarize_timeseries(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def finalize(
     job_id: str,

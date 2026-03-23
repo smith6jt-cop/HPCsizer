@@ -10,7 +10,6 @@ Usage (internal, injected by hpg):
 
 import csv
 import gzip
-import io
 import os
 import re
 import subprocess
@@ -19,10 +18,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
 # ---------------------------------------------------------------------------
 # /proc helpers
 # ---------------------------------------------------------------------------
+
 
 def _read_proc_status(pid: int) -> Dict[str, Any]:
     """Read VmRSS, VmHWM, VmSwap from /proc/<pid>/status."""
@@ -140,6 +139,7 @@ def _read_numastat() -> float:
 # Poll interval logic
 # ---------------------------------------------------------------------------
 
+
 def _poll_interval(elapsed_sec: float) -> int:
     if elapsed_sec < 600:
         return 10
@@ -151,6 +151,7 @@ def _poll_interval(elapsed_sec: float) -> int:
 # ---------------------------------------------------------------------------
 # Optional perf stat
 # ---------------------------------------------------------------------------
+
 
 def _check_perf_available() -> bool:
     try:
@@ -189,10 +190,19 @@ def _collect_perf(pid: int, duration_sec: int = 5) -> Dict[str, Optional[float]]
 # ---------------------------------------------------------------------------
 
 FIELDNAMES = [
-    "elapsed_sec", "rss_gb", "hwm_gb", "swap_gb", "threads",
-    "utime", "stime", "majflt",
-    "io_read_mb_s", "io_write_mb_s",
-    "pgmajfault", "cpu_frac", "numa_miss_rate",
+    "elapsed_sec",
+    "rss_gb",
+    "hwm_gb",
+    "swap_gb",
+    "threads",
+    "utime",
+    "stime",
+    "majflt",
+    "io_read_mb_s",
+    "io_write_mb_s",
+    "pgmajfault",
+    "cpu_frac",
+    "numa_miss_rate",
 ]
 
 
@@ -204,14 +214,13 @@ def monitor(
 ) -> None:
     """Run the monitoring loop; write output_path when done."""
     start_time = time.time()
-    perf_available = _check_perf_available()
+    _check_perf_available()
 
     if pids is None or not pids:
         pids = _find_job_pids(job_id)
 
     rows = []
     prev_io: Dict[int, Dict[str, int]] = {}
-    prev_cpu: Dict[int, int] = {}
     prev_wall: float = start_time
     prev_utime_sum: int = 0
 
@@ -257,14 +266,14 @@ def monitor(
             clk_tck = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
             cpu_frac = (utime_delta / clk_tck) / wall_delta if wall_delta > 0 else 0.0
 
-            prev_io_total = sum(
-                v.get("read_bytes", 0) for v in prev_io.values()
+            prev_io_total = sum(v.get("read_bytes", 0) for v in prev_io.values())
+            prev_write_total = sum(v.get("write_bytes", 0) for v in prev_io.values())
+            io_read_mb_s = (
+                (read_bytes - prev_io_total) / 1024**2 / wall_delta if wall_delta > 0 else 0.0
             )
-            prev_write_total = sum(
-                v.get("write_bytes", 0) for v in prev_io.values()
+            io_write_mb_s = (
+                (write_bytes - prev_write_total) / 1024**2 / wall_delta if wall_delta > 0 else 0.0
             )
-            io_read_mb_s = (read_bytes - prev_io_total) / 1024**2 / wall_delta if wall_delta > 0 else 0.0
-            io_write_mb_s = (write_bytes - prev_write_total) / 1024**2 / wall_delta if wall_delta > 0 else 0.0
 
             prev_wall = now
             prev_utime_sum = utime_sum

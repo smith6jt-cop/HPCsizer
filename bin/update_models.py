@@ -9,7 +9,6 @@ Run nightly from cron:
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,8 +20,9 @@ from lib.db import init_db, query_jobs, upsert_tool_model
 MIN_SAMPLES = 10  # Minimum samples to fit a model
 
 try:
-    import numpy as np
+    import numpy as np  # noqa: F401
     from scipy import stats as scipy_stats
+
     _HAS_NUMPY = True
 except ImportError:
     _HAS_NUMPY = False
@@ -85,7 +85,7 @@ def fit_model(
 
     if _HAS_NUMPY:
         slope, intercept, r_value, _, _ = scipy_stats.linregress(xs, ys)
-        r_squared = r_value ** 2
+        r_squared = r_value**2
     else:
         # Manual least-squares
         n = len(xs)

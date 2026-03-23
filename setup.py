@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="hpcsizer",
@@ -13,5 +13,11 @@ setup(
         "pandas>=1.3",
         "matplotlib>=3.4",
     ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0",
+            "ruff>=0.4",
+        ],
+    },
     scripts=["bin/hpg"],
 )

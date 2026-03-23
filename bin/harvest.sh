@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# harvest.sh — Cron-based sacct harvester for HPCsizer.
+# harvest.sh — sacct harvester for HPCsizer.
 #
 # Queries sacct for group jobs completed in the last 20 minutes and
 # upserts them into the profile database.
 #
-# Intended to be run every 15 minutes from cron:
-#   */15 * * * * /blue/GROUP/hpg-sizer/bin/harvest.sh
+# Called every 15 minutes by scheduler.sh (self-resubmitting SLURM job).
 #
 # Environment variables:
 #   HPCSIZER_DB   — path to profiles.db (default: <repo>/profiles.db)

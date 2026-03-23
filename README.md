@@ -133,44 +133,43 @@ python bin/hpg recommend /tmp/test.sbatch
 The `recommend` output should detect R as the language, Seurat as a tool, and
 return a cold-start heuristic since there is no sidecar data yet.
 
-### 8. Set up cron
+### 8. Start the scheduler
 
-Resolve the Python path inside the named conda environment:
+Regular users on HiPerGator do not have access to `crontab`. Instead,
+HPCsizer uses a lightweight self-resubmitting SLURM job that runs every
+15 minutes (and triggers the nightly model update at 3 AM).
 
-```bash
-HPCSIZER_PYTHON="$(conda run -n hpcsizer which python)"
-echo "Python path: $HPCSIZER_PYTHON"
-```
-
-Then edit your crontab:
+Start the scheduler:
 
 ```bash
-crontab -e
+sbatch bin/scheduler.sh
 ```
 
-Add the following, substituting `<GROUP_DIR>`, `<SLURM_ACCOUNT>`, and
-`<PYTHON_PATH>` (the output from the `conda run` command above):
+The job requests minimal resources (1 CPU, 512 MB, 5-min time limit). Each
+run resubmits itself with `--begin=now+15minutes` before doing any work, so
+the chain continues even if a single run fails.
 
-```cron
-HPCSIZER_DB=<GROUP_DIR>/hpg-sizer/profiles.db
-HPCSIZER_ACCT=<SLURM_ACCOUNT>
-HPCSIZER_ROOT=<GROUP_DIR>/hpg-sizer
-
-*/15 * * * * <GROUP_DIR>/hpg-sizer/bin/harvest.sh >> <GROUP_DIR>/hpg-sizer/logs/harvest.log 2>&1
-0 3 * * * <PYTHON_PATH> <GROUP_DIR>/hpg-sizer/bin/update_models.py --db <GROUP_DIR>/hpg-sizer/profiles.db >> <GROUP_DIR>/hpg-sizer/logs/models.log 2>&1
-```
-
-Verify:
+To stop the scheduler:
 
 ```bash
-crontab -l
+scancel --name=hpcsizer-scheduler
 ```
 
-Wait 15-20 minutes, then check:
+Verify it is running:
+
+```bash
+squeue -u "$USER" --name=hpcsizer-scheduler
+```
+
+After 15-20 minutes, check the logs:
 
 ```bash
 cat logs/harvest.log
 ```
+
+> **Note:** The `--qos=minimal` line in `scheduler.sh` may need to be
+> adjusted or removed depending on your cluster's available QOS tiers. Edit
+> the `#SBATCH --qos` line if the job is rejected.
 
 > **Note:** `harvest.sh` still uses `-X`, so ongoing harvests won't capture
 > `.batch` MaxRSS. The same two-pass parent+batch merge logic from the backfill
@@ -200,8 +199,9 @@ bin/backfill.py      One-time sacct backfill with .batch MaxRSS merging
 bin/validate.py      Setup and database validation checks
 bin/monitor.py       Sidecar process — polls /proc during job execution
 bin/finalize.py      Post-job collector — queries sacct, computes flags, stores to DB
-bin/harvest.sh       Cron job — bulk-harvests sacct data every 15 minutes
-bin/update_models.py Cron job — fits per-tool linear regression models nightly
+bin/scheduler.sh     Self-resubmitting SLURM job — replaces crontab
+bin/harvest.sh       Harvests sacct data every 15 minutes (called by scheduler)
+bin/update_models.py Fits per-tool linear regression models nightly (called by scheduler)
 
 lib/analyzer.py      Static analysis of sbatch scripts
 lib/db.py            SQLite database layer (WAL mode)

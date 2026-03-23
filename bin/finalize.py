@@ -91,7 +91,7 @@ def _parse_elapsed(t: str) -> int:
 def _parse_gpus(tres_str: str) -> int:
     """Extract GPU count from TRES string like 'gres/gpu=1'."""
     import re
-    m = re.search(r"gres/gpu=(\d+)", tres_str or "")
+    m = re.search(r"gres/gpu(?::\w+)?=(\d+)", tres_str or "")
     return int(m.group(1)) if m else 0
 
 

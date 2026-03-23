@@ -4,8 +4,7 @@
 Fits per-tool linear regression models (memory vs input file size) from the
 profile database and stores updated parameters in the tool_models table.
 
-Run nightly from cron:
-    0 3 * * * /blue/GROUP/hpg-sizer/bin/update_models.py
+Run nightly at 3 AM by scheduler.sh (self-resubmitting SLURM job).
 """
 
 import json

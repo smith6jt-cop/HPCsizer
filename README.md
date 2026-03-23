@@ -42,6 +42,7 @@ git clone https://github.com/smith6jt-cop/HPCsizer.git hpg-sizer
 cd hpg-sizer
 mamba env create -f environment.yml   # or: conda env create -f environment.yml
 conda activate hpcsizer
+pip install -e .
 ```
 
 ### 2. Initialize runtime directories and database

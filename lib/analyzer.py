@@ -22,7 +22,7 @@ _SBATCH_RE = re.compile(r"^#SBATCH\s+(.*)", re.MULTILINE)
 _MEM_RE = re.compile(r"--mem(?:-per-cpu)?=(\d+)([KMGTkmgt]?)")
 _CPU_RE = re.compile(r"--cpus-per-task=(\d+)")
 _TIME_RE = re.compile(r"--time=(\S+)")
-_GRES_RE = re.compile(r"--gres=gpu:(\d+)")
+_GRES_RE = re.compile(r"--gres=gpu(?::\w+)?:(\d+)")
 _JOB_NAME_RE = re.compile(r"--job-name=(\S+)")
 
 
@@ -177,7 +177,7 @@ def detect_tools(text: str, language: str) -> List[str]:
 # Input file detection
 # ---------------------------------------------------------------------------
 
-_FILE_PATH_RE = re.compile(r'["\']?((?:/blue|/orange|/scratch)\S+?)["\'\s;,)]')
+_FILE_PATH_RE = re.compile(r'["\']?((?:/blue|/orange|/red|/scratch|/home)\S+?)["\'\s;,)]')
 _FORMAT_MULTIPLIERS = {
     ".rds": 2.5,
     ".RDS": 2.5,

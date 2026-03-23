@@ -13,9 +13,5 @@ setup(
         "pandas>=1.3",
         "matplotlib>=3.4",
     ],
-    entry_points={
-        "console_scripts": [
-            "hpg=bin.hpg:cli",
-        ],
-    },
+    scripts=["bin/hpg"],
 )

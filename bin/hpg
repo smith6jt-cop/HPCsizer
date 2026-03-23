@@ -190,15 +190,30 @@ def submit(script: str, yes: bool, as_is: bool) -> None:
 def _apply_recommendations(script_text: str, rec: Dict[str, Any]) -> str:
     """Overwrite #SBATCH --mem and --cpus-per-task with recommended values."""
     import re
-    mem_str = f"{rec['mem_gb']:.0f}G"
-    script_text = re.sub(
-        r"(#SBATCH\s+--mem(?:-per-cpu)?=)\S+",
-        f"#SBATCH --mem={mem_str}",
-        script_text,
-    )
+    mem_gb = rec['mem_gb']
+    cpus = rec['cpus']
+    # Preserve --mem-per-cpu if the script uses it; divide total by CPUs
+    if re.search(r"#SBATCH\s+--mem-per-cpu=", script_text):
+        per_cpu_gb = mem_gb / max(cpus, 1)
+        if per_cpu_gb >= 1:
+            mem_str = f"{per_cpu_gb:.0f}G"
+        else:
+            mem_str = f"{per_cpu_gb * 1024:.0f}M"
+        script_text = re.sub(
+            r"(#SBATCH\s+--mem-per-cpu=)\S+",
+            f"#SBATCH --mem-per-cpu={mem_str}",
+            script_text,
+        )
+    else:
+        mem_str = f"{mem_gb:.0f}G"
+        script_text = re.sub(
+            r"(#SBATCH\s+--mem=)\S+",
+            f"#SBATCH --mem={mem_str}",
+            script_text,
+        )
     script_text = re.sub(
         r"(#SBATCH\s+--cpus-per-task=)\d+",
-        f"#SBATCH --cpus-per-task={rec['cpus']}",
+        f"#SBATCH --cpus-per-task={cpus}",
         script_text,
     )
     return script_text

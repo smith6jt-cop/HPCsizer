@@ -65,6 +65,10 @@ class TestSbatchDirectives:
         d = parse_sbatch_directives("#SBATCH --mem=4096M\n")
         assert d["req_mem_gb"] == pytest.approx(4.0)
 
+    def test_mem_per_cpu(self):
+        d = parse_sbatch_directives("#SBATCH --mem-per-cpu=8G\n")
+        assert d["req_mem_gb"] == pytest.approx(8.0)
+
     def test_cpus(self):
         d = parse_sbatch_directives("#SBATCH --cpus-per-task=8\n")
         assert d["req_cpus"] == 8
@@ -80,6 +84,10 @@ class TestSbatchDirectives:
     def test_gpus(self):
         d = parse_sbatch_directives("#SBATCH --gres=gpu:2\n")
         assert d["req_gpus"] == 2
+
+    def test_gpus_with_type(self):
+        d = parse_sbatch_directives("#SBATCH --gres=gpu:a100:4\n")
+        assert d["req_gpus"] == 4
 
     def test_full_r_script(self):
         d = parse_sbatch_directives(SAMPLE_R_SCRIPT)
@@ -138,6 +146,16 @@ class TestInputFileDetection:
         text = 'read.csv("/orange/group/data/meta.csv")'
         files = detect_input_files(text)
         assert any(f["path"].endswith("meta.csv") for f in files)
+
+    def test_finds_home_paths(self):
+        text = 'read.csv("/home/user/data/meta.csv")'
+        files = detect_input_files(text)
+        assert any(f["path"].endswith("meta.csv") for f in files)
+
+    def test_finds_red_paths(self):
+        text = 'readRDS("/red/group/data/cells.rds")'
+        files = detect_input_files(text)
+        assert any(f["path"].endswith("cells.rds") for f in files)
 
     def test_no_size_for_nonexistent(self):
         text = 'readRDS("/blue/nonexistent/fake.rds")'

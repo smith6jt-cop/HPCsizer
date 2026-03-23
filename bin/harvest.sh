@@ -17,8 +17,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${HPCSIZER_ROOT:-$(dirname "$SCRIPT_DIR")}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-PYTHON="${REPO_ROOT}/env/bin/python"
-if [[ ! -x "$PYTHON" ]]; then
+# Prefer conda environment if available, then fall back to system python
+if command -v conda &>/dev/null && conda env list 2>/dev/null | grep -q "^hpcsizer "; then
+    eval "$(conda shell.bash hook 2>/dev/null)"
+    conda activate hpcsizer
+    PYTHON="$(command -v python3)"
+elif [[ -x "${REPO_ROOT}/env/bin/python" ]]; then
+    PYTHON="${REPO_ROOT}/env/bin/python"
+else
     PYTHON="$(command -v python3 || command -v python)"
 fi
 
@@ -75,7 +81,7 @@ def parse_elapsed(t):
     return 0
 
 def parse_gpus(tres):
-    m = re.search(r"gres/gpu=(\d+)", tres or "")
+    m = re.search(r"gres/gpu(?::\w+)?=(\d+)", tres or "")
     return int(m.group(1)) if m else 0
 
 count = 0

@@ -174,6 +174,11 @@ def _summarize_timeseries(
         idx = int(p / 100 * len(vals))
         return sorted(vals)[min(idx, len(vals) - 1)]
 
+    # Lustre metrics
+    lustre_r = [r["lustre_read_mb_s"] for r in rows if r.get("lustre_read_mb_s") is not None]
+    lustre_w = [r["lustre_write_mb_s"] for r in rows if r.get("lustre_write_mb_s") is not None]
+    lustre_meta = [r["lustre_metadata_ops_s"] for r in rows if r.get("lustre_metadata_ops_s") is not None]
+
     return {
         "sidecar_peak_gb": max(rss) if rss else None,
         "sidecar_p95_gb": _pct(rss, 95),
@@ -182,7 +187,134 @@ def _summarize_timeseries(
         "sidecar_peak_write_mb_s": max(io_write) if io_write else None,
         "sidecar_avg_threads": sum(threads) / len(threads) if threads else None,
         "sidecar_numa_miss_rate": sum(numa) / len(numa) if numa else None,
+        "lustre_peak_read_mb_s": max(lustre_r) if lustre_r else None,
+        "lustre_peak_write_mb_s": max(lustre_w) if lustre_w else None,
+        "lustre_avg_metadata_ops_s": sum(lustre_meta) / len(lustre_meta) if lustre_meta else None,
     }
+
+
+def _load_multinode_timeseries(
+    ts_dir: str, job_id: str
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Load per-node time-series files for a multi-node job.
+
+    Looks for files matching <job_id>.node_<hostname>.csv.gz.
+    Returns a dict of {hostname: [rows]}.
+    """
+    import glob
+
+    pattern = os.path.join(ts_dir, f"{job_id}.node_*.csv.gz")
+    node_data: Dict[str, List[Dict[str, Any]]] = {}
+    for path in sorted(glob.glob(pattern)):
+        basename = os.path.basename(path)
+        # Extract hostname from: JOB_ID.node_HOSTNAME.csv.gz
+        parts = basename.replace(".csv.gz", "").split(".node_")
+        if len(parts) == 2:
+            hostname = parts[1]
+            try:
+                rows = load_timeseries(path)
+                if rows:
+                    node_data[hostname] = rows
+            except Exception as exc:
+                print(
+                    f"[finalize] WARNING: could not load {path}: {exc}",
+                    file=sys.stderr,
+                )
+    return node_data
+
+
+def _compute_node_imbalance(
+    node_data: Dict[str, List[Dict[str, Any]]]
+) -> Dict[str, Optional[float]]:
+    """Compute cross-node imbalance metrics from per-node time-series.
+
+    Returns:
+        node_imbalance_cv: coefficient of variation of mean CPU fraction
+                           across nodes.  CV > 1.0 indicates severe imbalance.
+    """
+    if len(node_data) < 2:
+        return {"node_imbalance_cv": None}
+
+    node_mean_cpu: List[float] = []
+    for hostname, rows in node_data.items():
+        cpu_vals = [r.get("cpu_frac") for r in rows if r.get("cpu_frac") is not None]
+        if cpu_vals:
+            node_mean_cpu.append(sum(cpu_vals) / len(cpu_vals))
+
+    if len(node_mean_cpu) < 2:
+        return {"node_imbalance_cv": None}
+
+    mean_val = sum(node_mean_cpu) / len(node_mean_cpu)
+    if mean_val == 0:
+        return {"node_imbalance_cv": None}
+
+    variance = sum((x - mean_val) ** 2 for x in node_mean_cpu) / len(node_mean_cpu)
+    stddev = variance ** 0.5
+    cv = stddev / mean_val
+
+    return {"node_imbalance_cv": round(cv, 4)}
+
+
+def _merge_multinode_timeseries(
+    node_data: Dict[str, List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """Merge per-node time-series into a single aggregate series.
+
+    RSS and IO are summed across nodes. CPU fraction is averaged.
+    This merged series is used for flag detection and summary stats.
+    """
+    if not node_data:
+        return []
+    if len(node_data) == 1:
+        return list(node_data.values())[0]
+
+    # Use the node with the most data points as the time reference
+    ref_hostname = max(node_data, key=lambda h: len(node_data[h]))
+    ref_rows = node_data[ref_hostname]
+    merged: List[Dict[str, Any]] = []
+
+    for i, ref_row in enumerate(ref_rows):
+        row: Dict[str, Any] = {"elapsed_sec": ref_row.get("elapsed_sec")}
+        # Fields to sum across nodes
+        for field in ("rss_gb", "swap_gb", "io_read_mb_s", "io_write_mb_s",
+                       "lustre_read_mb_s", "lustre_write_mb_s"):
+            total = 0.0
+            count = 0
+            for hostname, rows in node_data.items():
+                if i < len(rows) and rows[i].get(field) is not None:
+                    total += rows[i][field]
+                    count += 1
+            row[field] = total if count > 0 else None
+
+        # Fields to take max across nodes
+        for field in ("hwm_gb",):
+            vals = []
+            for hostname, rows in node_data.items():
+                if i < len(rows) and rows[i].get(field) is not None:
+                    vals.append(rows[i][field])
+            row[field] = max(vals) if vals else None
+
+        # Fields to average across nodes
+        for field in ("cpu_frac", "numa_miss_rate", "lustre_metadata_ops_s"):
+            vals = []
+            for hostname, rows in node_data.items():
+                if i < len(rows) and rows[i].get(field) is not None:
+                    vals.append(rows[i][field])
+            row[field] = (sum(vals) / len(vals)) if vals else None
+
+        # Fields to sum
+        for field in ("threads", "utime", "stime", "majflt"):
+            total_int = 0
+            count = 0
+            for hostname, rows in node_data.items():
+                if i < len(rows) and rows[i].get(field) is not None:
+                    total_int += int(rows[i][field])
+                    count += 1
+            row[field] = total_int if count > 0 else None
+
+        merged.append(row)
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -207,15 +339,51 @@ def finalize(
         print(f"[finalize] WARNING: sacct returned no data for job {job_id}", file=sys.stderr)
         job = {"job_id": job_id}
 
-    # Load time-series if available
-    ts_path = os.path.join(ts_dir, f"{job_id}.csv.gz")
+    # Load time-series — check for multi-node files first
+    import glob
+
+    multinode_pattern = os.path.join(ts_dir, f"{job_id}.node_*.csv.gz")
+    multinode_files = sorted(glob.glob(multinode_pattern))
+
     timeseries: List[Dict[str, Any]] = []
-    if os.path.exists(ts_path):
-        try:
-            timeseries = load_timeseries(ts_path)
+
+    if multinode_files:
+        # Multi-node job
+        node_data = _load_multinode_timeseries(ts_dir, job_id)
+        if node_data:
             job["has_sidecar"] = 1
+            job["num_nodes"] = len(node_data)
+            # Compute cross-node imbalance
+            imbalance = _compute_node_imbalance(node_data)
+            job.update(imbalance)
+            # Merge into single aggregate series for downstream processing
+            timeseries = _merge_multinode_timeseries(node_data)
+    else:
+        # Single-node job — original behavior
+        ts_path = os.path.join(ts_dir, f"{job_id}.csv.gz")
+        if os.path.exists(ts_path):
+            try:
+                timeseries = load_timeseries(ts_path)
+                job["has_sidecar"] = 1
+                job["num_nodes"] = 1
+            except Exception as exc:
+                print(
+                    f"[finalize] WARNING: could not load timeseries: {exc}",
+                    file=sys.stderr,
+                )
+
+    # Load perf summary if available
+    perf_path = os.path.join(ts_dir, f"{job_id}.perf.json")
+    if os.path.exists(perf_path):
+        try:
+            with open(perf_path) as fh:
+                perf_data = json.load(fh)
+            if "cpi" in perf_data:
+                job["cpi"] = perf_data["cpi"]
+            if "cache_miss_rate" in perf_data:
+                job["cache_miss_rate"] = perf_data["cache_miss_rate"]
         except Exception as exc:
-            print(f"[finalize] WARNING: could not load timeseries: {exc}", file=sys.stderr)
+            print(f"[finalize] WARNING: could not load perf data: {exc}", file=sys.stderr)
 
     if timeseries:
         job.update(_summarize_timeseries(timeseries))

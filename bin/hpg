@@ -79,16 +79,27 @@ def _print_recommendation(meta: Dict[str, Any], rec: Dict[str, Any]) -> None:
 
 
 def _inject_sidecar(script_text: str, job_id_var: str, ts_path: str, context_path: str) -> str:
-    """Return script text with sidecar monitor injected."""
+    """Return script text with sidecar monitor injected.
+
+    For multi-node jobs (SLURM_JOB_NUM_NODES > 1), uses srun --overlap to
+    launch the monitor on every node. Each node writes its own time-series
+    file with the hostname embedded in the filename.
+    """
     python_bin = sys.executable
     monitor_launch = (
         f"\n# --- HPCsizer sidecar monitor (injected) ---\n"
         f"HPG_JOB_ID=${{SLURM_JOB_ID}}\n"
         f"HPG_TS_PATH=\"{ts_path}/${{HPG_JOB_ID}}.csv.gz\"\n"
         f"mkdir -p \"{ts_path}\"\n"
-        f"{python_bin} {_MONITOR_PY} ${{HPG_JOB_ID}} ${{HPG_TS_PATH}} &\n"
+        f"HPG_NUM_NODES=${{SLURM_JOB_NUM_NODES:-1}}\n"
+        f"if [ \"$HPG_NUM_NODES\" -gt 1 ]; then\n"
+        f"  srun --overlap --ntasks-per-node=1 --nodes=${{HPG_NUM_NODES}} \\\n"
+        f"    {python_bin} {_MONITOR_PY} ${{HPG_JOB_ID}} ${{HPG_TS_PATH}} &\n"
+        f"else\n"
+        f"  {python_bin} {_MONITOR_PY} ${{HPG_JOB_ID}} ${{HPG_TS_PATH}} &\n"
+        f"fi\n"
         f"HPG_MONITOR_PID=$!\n"
-        f"trap 'kill $HPG_MONITOR_PID 2>/dev/null; "
+        f"trap 'kill $HPG_MONITOR_PID 2>/dev/null; wait $HPG_MONITOR_PID 2>/dev/null; "
         f"{python_bin} {_FINALIZE_PY} ${{HPG_JOB_ID}} "
         f"--db {_DEFAULT_DB} --ts-dir {ts_path} --context {context_path}' EXIT\n"
         f"# --- end HPCsizer injection ---\n"
@@ -102,7 +113,6 @@ def _inject_sidecar(script_text: str, job_id_var: str, ts_path: str, context_pat
     if last_sbatch >= 0:
         lines.insert(last_sbatch + 1, monitor_launch)
     else:
-        # Insert after shebang
         lines.insert(1 if lines and lines[0].startswith("#!") else 0, monitor_launch)
     return "".join(lines)
 

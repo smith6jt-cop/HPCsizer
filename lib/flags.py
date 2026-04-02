@@ -39,6 +39,34 @@ def detect_flags(
     if mem_eff is not None and mem_eff < 0.25:
         flags.append("mem_overrequest")
 
+    # high_cpi: average cycles per instruction above threshold
+    cpi = job.get("cpi")
+    if cpi is not None and cpi > 1.0:
+        flags.append("high_cpi")
+
+    # cache_thrashing: high cache miss rate indicating poor data locality
+    cache_miss = job.get("cache_miss_rate")
+    if cache_miss is not None and cache_miss > 0.5:
+        flags.append("cache_thrashing")
+
+    # node_imbalance: high coefficient of variation in CPU use across nodes
+    node_cv = job.get("node_imbalance_cv")
+    num_nodes = job.get("num_nodes") or 1
+    if node_cv is not None and num_nodes > 1 and node_cv > 1.0:
+        flags.append("node_imbalance")
+
+    # idle_nodes: multi-node job but effectively single-node CPU usage
+    if num_nodes > 1:
+        cpu_time = job.get("sacct_cpu_time_sec")
+        elapsed = job.get("sacct_elapsed_sec") or 1
+        req_cpus = job.get("req_cpus") or 1
+        if cpu_time is not None and elapsed > 0 and req_cpus > 0:
+            # If total CPU time is less than what 1 node could produce,
+            # some nodes are likely idle
+            single_node_capacity = elapsed * req_cpus
+            if cpu_time < single_node_capacity * 0.5:
+                flags.append("idle_nodes")
+
     # CPU-related flags require time-series
     if timeseries and len(timeseries) > 2:
         cpu_fracs = [r.get("cpu_frac") for r in timeseries if r.get("cpu_frac") is not None]
@@ -90,6 +118,28 @@ def detect_flags(
             second_half = sum(cpu_fracs[mid:]) / (len(cpu_fracs) - mid)
             if first_half > 0.10 and second_half < 0.05:
                 flags.append("catastrophe")
+
+        # lustre_metadata_heavy: excessive metadata operations per second
+        lustre_meta_rates = [
+            r.get("lustre_metadata_ops_s")
+            for r in timeseries
+            if r.get("lustre_metadata_ops_s") is not None
+        ]
+        if lustre_meta_rates:
+            avg_meta = sum(lustre_meta_rates) / len(lustre_meta_rates)
+            if avg_meta > 100.0:
+                flags.append("lustre_metadata_heavy")
+
+        # lustre_io_dominant: most wall time spent in high Lustre I/O with low CPU
+        lustre_reads = [r.get("lustre_read_mb_s", 0) or 0 for r in timeseries]
+        if lustre_reads and cpu_fracs:
+            high_lustre_io = sum(
+                1
+                for lr, cpu in zip(lustre_reads, cpu_fracs)
+                if lr > 50 and cpu < 0.10
+            )
+            if high_lustre_io / len(timeseries) > 0.50:
+                flags.append("lustre_io_dominant")
 
     return flags
 

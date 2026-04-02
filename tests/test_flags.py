@@ -142,6 +142,114 @@ class TestDetectFlags:
         assert "idle_cpu" not in flags
         assert "oom_killed" not in flags
 
+    # --- Lustre flags ---
+
+    def test_lustre_metadata_heavy(self):
+        job = _make_job()
+        ts = [
+            {
+                "elapsed_sec": i * 30,
+                "cpu_frac": 0.5,
+                "rss_gb": 20.0,
+                "io_read_mb_s": 0,
+                "threads": 4,
+                "numa_miss_rate": 0.0,
+                "lustre_metadata_ops_s": 200.0,
+                "lustre_read_mb_s": 0.0,
+            }
+            for i in range(100)
+        ]
+        assert "lustre_metadata_heavy" in detect_flags(job, ts)
+
+    def test_no_lustre_metadata_heavy_when_low(self):
+        job = _make_job()
+        ts = [
+            {
+                "elapsed_sec": i * 30,
+                "cpu_frac": 0.5,
+                "rss_gb": 20.0,
+                "io_read_mb_s": 0,
+                "threads": 4,
+                "numa_miss_rate": 0.0,
+                "lustre_metadata_ops_s": 10.0,
+                "lustre_read_mb_s": 0.0,
+            }
+            for i in range(100)
+        ]
+        assert "lustre_metadata_heavy" not in detect_flags(job, ts)
+
+    def test_lustre_io_dominant(self):
+        job = _make_job()
+        ts = [
+            {
+                "elapsed_sec": i * 30,
+                "cpu_frac": 0.02,
+                "rss_gb": 20.0,
+                "io_read_mb_s": 0,
+                "threads": 4,
+                "numa_miss_rate": 0.0,
+                "lustre_metadata_ops_s": 0.0,
+                "lustre_read_mb_s": 100.0,
+            }
+            for i in range(100)
+        ]
+        assert "lustre_io_dominant" in detect_flags(job, ts)
+
+    # --- CPI / Cache flags ---
+
+    def test_high_cpi(self):
+        job = _make_job(cpi=1.5)
+        assert "high_cpi" in detect_flags(job)
+
+    def test_no_high_cpi_when_efficient(self):
+        job = _make_job(cpi=0.6)
+        assert "high_cpi" not in detect_flags(job)
+
+    def test_no_high_cpi_when_none(self):
+        job = _make_job()
+        assert "high_cpi" not in detect_flags(job)
+
+    def test_cache_thrashing(self):
+        job = _make_job(cache_miss_rate=0.8)
+        assert "cache_thrashing" in detect_flags(job)
+
+    def test_no_cache_thrashing_when_low(self):
+        job = _make_job(cache_miss_rate=0.1)
+        assert "cache_thrashing" not in detect_flags(job)
+
+    # --- Multi-node flags ---
+
+    def test_node_imbalance(self):
+        job = _make_job(num_nodes=4, node_imbalance_cv=1.5)
+        assert "node_imbalance" in detect_flags(job)
+
+    def test_no_node_imbalance_single_node(self):
+        job = _make_job(num_nodes=1, node_imbalance_cv=2.0)
+        assert "node_imbalance" not in detect_flags(job)
+
+    def test_no_node_imbalance_when_balanced(self):
+        job = _make_job(num_nodes=4, node_imbalance_cv=0.3)
+        assert "node_imbalance" not in detect_flags(job)
+
+    def test_idle_nodes(self):
+        # 4 nodes, 8 CPUs per node, but CPU time < single-node capacity
+        job = _make_job(
+            num_nodes=4,
+            req_cpus=8,
+            sacct_elapsed_sec=3600,
+            sacct_cpu_time_sec=7200,  # only ~2 cores worth = far below 1 node
+        )
+        assert "idle_nodes" in detect_flags(job)
+
+    def test_no_idle_nodes_when_using_all(self):
+        job = _make_job(
+            num_nodes=4,
+            req_cpus=8,
+            sacct_elapsed_sec=3600,
+            sacct_cpu_time_sec=100000,  # well above single-node capacity
+        )
+        assert "idle_nodes" not in detect_flags(job)
+
 
 class TestComputeEfficiency:
     def test_mem_efficiency(self):

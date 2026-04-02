@@ -23,7 +23,6 @@
 #   HPCSIZER_ROOT — repo root directory
 
 #SBATCH --job-name=hpcsizer-scheduler
-#SBATCH --output=%x-%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=512mb
@@ -39,18 +38,40 @@ REPO_ROOT="${HPCSIZER_ROOT:-$(dirname "$SCRIPT_DIR")}"
 LOG_DIR="${REPO_ROOT}/logs"
 mkdir -p "$LOG_DIR"
 
+# Redirect all scheduler output to a timestamped log file
+SCHEDULER_LOG="${LOG_DIR}/scheduler.log"
+exec >> "$SCHEDULER_LOG" 2>&1
+
+echo ""
+echo "========================================"
+echo "[scheduler] $(date -Iseconds): Starting"
+echo "  REPO_ROOT=${REPO_ROOT}"
+echo "  HPCSIZER_DB=${HPCSIZER_DB:-<not set, using default>}"
+echo "  HPCSIZER_ACCT=${HPCSIZER_ACCT:-<not set>}"
+
 # ── 1. Resubmit ourselves to run again in 15 minutes ───────────────────────
 #    We do this FIRST so the chain is not broken if later steps fail.
 NEXT_JOB_ID=$(sbatch --begin=now+15minutes \
     --parsable \
-    --output="${LOG_DIR}/scheduler-%j.out" \
-    "$0")
-echo "[scheduler] $(date -Iseconds): Resubmitted as job ${NEXT_JOB_ID} (in 15 min)"
+    --export=ALL \
+    "$0") || {
+    echo "[scheduler] ERROR: Failed to resubmit. Chain is broken!"
+    echo "  Check QOS and account settings."
+}
+echo "[scheduler] Resubmitted as job ${NEXT_JOB_ID:-FAILED} (in 15 min)"
 
 # ── 2. Run harvest ─────────────────────────────────────────────────────────
 echo "[scheduler] Running harvest..."
-bash "${REPO_ROOT}/bin/harvest.sh" >> "${LOG_DIR}/harvest.log" 2>&1 || \
-    echo "[scheduler] WARNING: harvest.sh exited with status $?"
+if bash "${REPO_ROOT}/bin/harvest.sh" >> "${LOG_DIR}/harvest.log" 2>&1; then
+    echo "[scheduler] harvest.sh succeeded"
+else
+    HARVEST_STATUS=$?
+    echo "[scheduler] WARNING: harvest.sh exited with status ${HARVEST_STATUS}"
+    echo "[scheduler]   Check ${LOG_DIR}/harvest.log for details"
+    # Show last few lines of harvest log for quick diagnosis
+    echo "[scheduler]   Last 5 lines of harvest.log:"
+    tail -5 "${LOG_DIR}/harvest.log" 2>/dev/null | sed 's/^/    /' || true
+fi
 
 # ── 3. Run nightly model update at 3 AM ────────────────────────────────────
 CURRENT_HOUR=$(date +%H)

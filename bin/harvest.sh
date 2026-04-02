@@ -24,13 +24,18 @@ if command -v conda &>/dev/null && conda env list 2>/dev/null | grep -q "^hpcsiz
 elif [[ -x "${REPO_ROOT}/env/bin/python" ]]; then
     PYTHON="${REPO_ROOT}/env/bin/python"
 else
-    PYTHON="$(command -v python3 || command -v python)"
+    PYTHON="$(command -v python3 || command -v python || true)"
+fi
+
+if [[ -z "${PYTHON:-}" || ! -x "${PYTHON:-}" ]]; then
+    echo "[harvest] ERROR: No Python interpreter found. Set HPCSIZER_ROOT or install Python." >&2
+    exit 1
 fi
 
 DB_PATH="${HPCSIZER_DB:-${REPO_ROOT}/profiles.db}"
-ACCT_FLAG=""
+ACCT_FLAG=()
 if [[ -n "${HPCSIZER_ACCT:-}" ]]; then
-    ACCT_FLAG="-A ${HPCSIZER_ACCT}"
+    ACCT_FLAG=(-A "${HPCSIZER_ACCT}")
 fi
 
 LOOKBACK_MINUTES=20
@@ -42,7 +47,7 @@ FIELDS="JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timel
 echo "[harvest] $(date -Iseconds): querying sacct since ${START_TIME}"
 
 sacct --noheader --parsable2 \
-    ${ACCT_FLAG} \
+    "${ACCT_FLAG[@]}" \
     -S "${START_TIME}" \
     -o "${FIELDS}" \
 | "$PYTHON" - <<'PYEOF'

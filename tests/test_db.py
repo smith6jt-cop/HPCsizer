@@ -31,6 +31,21 @@ def test_init_db_creates_tables(tmp_db):
     assert "daily_summary" in tables
 
 
+def test_migrate_adds_new_columns(tmp_db):
+    from lib.db import migrate_db
+
+    migrate_db(tmp_db)
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_db)
+    cursor = conn.execute("PRAGMA table_info(jobs)")
+    columns = {row[1] for row in cursor.fetchall()}
+    conn.close()
+    assert "lustre_peak_read_mb_s" in columns
+    assert "num_nodes" in columns
+    assert "node_imbalance_cv" in columns
+
+
 def test_insert_and_get_job(tmp_db):
     job = {
         "job_id": "12345",

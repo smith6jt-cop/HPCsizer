@@ -75,8 +75,8 @@ def plot_job(
     threads = [r.get("threads") for r in rows]
     numa = [r.get("numa_miss_rate") for r in rows]
 
-    n_panels = 5
-    fig = plt.figure(figsize=(12, 14))
+    n_panels = 6
+    fig = plt.figure(figsize=(12, 17))
     gs = gridspec.GridSpec(n_panels, 1, hspace=0.45)
 
     title = f"Job {job_id}"
@@ -116,11 +116,23 @@ def plot_job(
     _plot_panel(1, cpu_frac, "CPU Fraction", "#4CAF50")
     _plot_panel(2, io_read, "Disk I/O Read (MB/s)", "#FF9800")
     _plot_panel(3, threads, "Thread Count", "#9C27B0")
-    ax4 = _plot_panel(4, numa, "NUMA Miss Rate", "#F44336")
-    ax4.set_xlabel("Elapsed Time (hours)", fontsize=9)
+
+    lustre_r = [r.get("lustre_read_mb_s") for r in rows]
+    lustre_w = [r.get("lustre_write_mb_s") for r in rows]
+    ax_lustre = _plot_panel(4, lustre_r, "Lustre Read (MB/s)", "#795548")
+    # Overlay write rate on same axes
+    xs_w = [xi for xi, yi in zip(x, lustre_w) if xi is not None and yi is not None]
+    ys_w = [yi for xi, yi in zip(x, lustre_w) if xi is not None and yi is not None]
+    if xs_w:
+        ax_lustre.plot(xs_w, ys_w, color="#FF5722", linewidth=0.9, label="Write")
+        ax_lustre.legend(fontsize=7)
+    ax_lustre.set_ylabel("Lustre I/O (MB/s)", fontsize=9)
+
+    ax5 = _plot_panel(5, numa, "NUMA Miss Rate", "#F44336")
+    ax5.set_xlabel("Elapsed Time (hours)", fontsize=9)
     if numa and any(v is not None for v in numa):
-        ax4.axhline(0.20, color="red", linestyle=":", linewidth=0.8, label="Threshold 0.20")
-        ax4.legend(fontsize=7)
+        ax5.axhline(0.20, color="red", linestyle=":", linewidth=0.8, label="Threshold 0.20")
+        ax5.legend(fontsize=7)
 
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, f"{job_id}.png")

@@ -135,6 +135,56 @@ def _read_numastat() -> float:
     return miss_total / total if total > 0 else 0.0
 
 
+def _read_lustre_stats():
+    """Read Lustre client stats from /proc/fs/lustre/llite/*/stats.
+
+    Returns cumulative byte counters and metadata op counts across all mounts.
+    These are node-level counters, not per-process.
+    """
+    result = {
+        "lustre_read_bytes": 0,
+        "lustre_write_bytes": 0,
+        "lustre_open_count": 0,
+        "lustre_close_count": 0,
+        "lustre_mmap_count": 0,
+        "lustre_seek_count": 0,
+    }
+    lustre_base = "/proc/fs/lustre/llite"
+    if not os.path.isdir(lustre_base):
+        return result
+    try:
+        for mount_dir in Path(lustre_base).iterdir():
+            stats_path = mount_dir / "stats"
+            if not stats_path.exists():
+                continue
+            try:
+                with open(stats_path) as fh:
+                    for line in fh:
+                        parts = line.split()
+                        if not parts:
+                            continue
+                        key = parts[0]
+                        # read_bytes and write_bytes lines have 7 fields:
+                        # name count samples unit min max sum
+                        if key == "read_bytes" and len(parts) >= 7:
+                            result["lustre_read_bytes"] += int(parts[6])
+                        elif key == "write_bytes" and len(parts) >= 7:
+                            result["lustre_write_bytes"] += int(parts[6])
+                        elif key == "open":
+                            result["lustre_open_count"] += int(parts[1])
+                        elif key == "close":
+                            result["lustre_close_count"] += int(parts[1])
+                        elif key == "mmap":
+                            result["lustre_mmap_count"] += int(parts[1])
+                        elif key == "seek":
+                            result["lustre_seek_count"] += int(parts[1])
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Poll interval logic
 # ---------------------------------------------------------------------------
@@ -203,6 +253,10 @@ FIELDNAMES = [
     "pgmajfault",
     "cpu_frac",
     "numa_miss_rate",
+    "lustre_read_mb_s",
+    "lustre_write_mb_s",
+    "lustre_metadata_ops_s",
+    "lustre_open_count",
 ]
 
 
@@ -214,7 +268,9 @@ def monitor(
 ) -> None:
     """Run the monitoring loop; write output_path when done."""
     start_time = time.time()
-    _check_perf_available()
+    perf_available = _check_perf_available()
+    perf_cpi_samples: List[float] = []
+    perf_cache_miss_samples: List[float] = []
 
     if pids is None or not pids:
         pids = _find_job_pids(job_id)
@@ -223,6 +279,7 @@ def monitor(
     prev_io: Dict[int, Dict[str, int]] = {}
     prev_wall: float = start_time
     prev_utime_sum: int = 0
+    prev_lustre: Dict[str, int] = {}
 
     try:
         while True:
@@ -259,6 +316,7 @@ def monitor(
 
             vmstat = _read_vmstat()
             numa_miss = _read_numastat()
+            lustre = _read_lustre_stats()
 
             wall_delta = now - prev_wall
             utime_delta = utime_sum - prev_utime_sum
@@ -275,9 +333,40 @@ def monitor(
                 (write_bytes - prev_write_total) / 1024**2 / wall_delta if wall_delta > 0 else 0.0
             )
 
+            lustre_read_delta = lustre["lustre_read_bytes"] - prev_lustre.get(
+                "lustre_read_bytes", lustre["lustre_read_bytes"]
+            )
+            lustre_write_delta = lustre["lustre_write_bytes"] - prev_lustre.get(
+                "lustre_write_bytes", lustre["lustre_write_bytes"]
+            )
+            lustre_meta_delta = (
+                (
+                    lustre["lustre_open_count"]
+                    - prev_lustre.get("lustre_open_count", lustre["lustre_open_count"])
+                )
+                + (
+                    lustre["lustre_close_count"]
+                    - prev_lustre.get("lustre_close_count", lustre["lustre_close_count"])
+                )
+                + (
+                    lustre["lustre_mmap_count"]
+                    - prev_lustre.get("lustre_mmap_count", lustre["lustre_mmap_count"])
+                )
+                + (
+                    lustre["lustre_seek_count"]
+                    - prev_lustre.get("lustre_seek_count", lustre["lustre_seek_count"])
+                )
+            )
+            lustre_read_mb_s = (lustre_read_delta / 1024**2 / wall_delta) if wall_delta > 0 else 0.0
+            lustre_write_mb_s = (
+                (lustre_write_delta / 1024**2 / wall_delta) if wall_delta > 0 else 0.0
+            )
+            lustre_metadata_ops_s = (lustre_meta_delta / wall_delta) if wall_delta > 0 else 0.0
+
             prev_wall = now
             prev_utime_sum = utime_sum
             prev_io = {0: {"read_bytes": read_bytes, "write_bytes": write_bytes}}
+            prev_lustre = lustre
 
             row = {
                 "elapsed_sec": round(elapsed, 1),
@@ -293,8 +382,23 @@ def monitor(
                 "pgmajfault": vmstat.get("pgmajfault"),
                 "cpu_frac": round(min(cpu_frac, float(max(len(pids), 1))), 4),
                 "numa_miss_rate": round(numa_miss, 5),
+                "lustre_read_mb_s": round(max(lustre_read_mb_s, 0), 3),
+                "lustre_write_mb_s": round(max(lustre_write_mb_s, 0), 3),
+                "lustre_metadata_ops_s": round(lustre_metadata_ops_s, 3),
+                "lustre_open_count": lustre["lustre_open_count"],
             }
             rows.append(row)
+
+            # Collect perf stats every 5 minutes (not every poll)
+            if perf_available and elapsed > 60:
+                poll_interval = _poll_interval(elapsed)
+                if int(elapsed) % 300 < poll_interval:
+                    for pid in pids[:1]:  # Sample first PID only
+                        perf_data = _collect_perf(pid, duration_sec=3)
+                        if perf_data.get("cpi") is not None:
+                            perf_cpi_samples.append(perf_data["cpi"])
+                        if perf_data.get("cache_miss_rate") is not None:
+                            perf_cache_miss_samples.append(perf_data["cache_miss_rate"])
 
             interval = _poll_interval(elapsed)
             time.sleep(interval)
@@ -303,6 +407,23 @@ def monitor(
         pass
     finally:
         _write_output(output_path, rows)
+        # Write perf summary if we collected any samples
+        if perf_cpi_samples or perf_cache_miss_samples:
+            perf_summary = {}
+            if perf_cpi_samples:
+                perf_summary["cpi"] = sum(perf_cpi_samples) / len(perf_cpi_samples)
+            if perf_cache_miss_samples:
+                perf_summary["cache_miss_rate"] = sum(perf_cache_miss_samples) / len(
+                    perf_cache_miss_samples
+                )
+            perf_path = output_path.replace(".csv.gz", ".perf.json")
+            try:
+                import json as _json
+
+                with open(perf_path, "w") as fh:
+                    _json.dump(perf_summary, fh)
+            except OSError:
+                pass
 
 
 def _write_output(output_path: str, rows: list) -> None:
@@ -316,9 +437,21 @@ def _write_output(output_path: str, rows: list) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <job_id> <output.csv.gz> [pid ...]", file=sys.stderr)
+        print(f"Usage: {sys.argv[0]} <job_id> <output_template.csv.gz> [pid ...]", file=sys.stderr)
         sys.exit(1)
     _job_id = sys.argv[1]
-    _output = sys.argv[2]
+    _output_template = sys.argv[2]
+
+    # In multi-node mode, embed hostname in output filename
+    import socket
+
+    _num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", "1"))
+    if _num_nodes > 1:
+        hostname = socket.gethostname().split(".")[0]
+        # Convert /path/to/JOB_ID.csv.gz -> /path/to/JOB_ID.node_HOSTNAME.csv.gz
+        _output = _output_template.replace(".csv.gz", f".node_{hostname}.csv.gz")
+    else:
+        _output = _output_template
+
     _pids = [int(p) for p in sys.argv[3:]] if len(sys.argv) > 3 else None
     monitor(_job_id, _output, _pids)

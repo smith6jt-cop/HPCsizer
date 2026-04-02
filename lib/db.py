@@ -73,6 +73,15 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 -- optional perf counters
                 cpi             REAL,
                 cache_miss_rate REAL,
+                -- lustre filesystem metrics
+                lustre_peak_read_mb_s   REAL,
+                lustre_peak_write_mb_s  REAL,
+                lustre_avg_metadata_ops_s REAL,
+                lustre_total_read_gb    REAL,
+                lustre_total_write_gb   REAL,
+                -- multi-node
+                num_nodes           INTEGER DEFAULT 1,
+                node_imbalance_cv   REAL,
                 -- source tracking
                 has_sidecar     INTEGER DEFAULT 0,
                 created_at      TEXT DEFAULT (datetime('now'))
@@ -101,6 +110,32 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             );
             """
         )
+    conn.close()
+    migrate_db(db_path)
+
+
+def migrate_db(db_path: str = DEFAULT_DB_PATH) -> None:
+    """Add columns introduced in later versions. Safe to call repeatedly."""
+    conn = get_connection(db_path)
+    new_columns = [
+        # Lustre metrics (Feature 1)
+        ("lustre_peak_read_mb_s", "REAL"),
+        ("lustre_peak_write_mb_s", "REAL"),
+        ("lustre_avg_metadata_ops_s", "REAL"),
+        ("lustre_total_read_gb", "REAL"),
+        ("lustre_total_write_gb", "REAL"),
+        # Hardware counters (Feature 2)
+        # (cpi and cache_miss_rate already exist in schema)
+        # Multi-node (Feature 3)
+        ("num_nodes", "INTEGER DEFAULT 1"),
+        ("node_imbalance_cv", "REAL"),
+    ]
+    with conn:
+        for col, typedef in new_columns:
+            try:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
     conn.close()
 
 

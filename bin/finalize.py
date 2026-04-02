@@ -181,6 +181,15 @@ def _summarize_timeseries(
         r["lustre_metadata_ops_s"] for r in rows if r.get("lustre_metadata_ops_s") is not None
     ]
 
+    # Compute total Lustre bytes by integrating rate * interval duration
+    lustre_total_read_mb = 0.0
+    lustre_total_write_mb = 0.0
+    for i in range(1, len(rows)):
+        dt = (rows[i].get("elapsed_sec") or 0) - (rows[i - 1].get("elapsed_sec") or 0)
+        if dt > 0:
+            lustre_total_read_mb += (rows[i].get("lustre_read_mb_s") or 0) * dt
+            lustre_total_write_mb += (rows[i].get("lustre_write_mb_s") or 0) * dt
+
     return {
         "sidecar_peak_gb": max(rss) if rss else None,
         "sidecar_p95_gb": _pct(rss, 95),
@@ -192,6 +201,8 @@ def _summarize_timeseries(
         "lustre_peak_read_mb_s": max(lustre_r) if lustre_r else None,
         "lustre_peak_write_mb_s": max(lustre_w) if lustre_w else None,
         "lustre_avg_metadata_ops_s": sum(lustre_meta) / len(lustre_meta) if lustre_meta else None,
+        "lustre_total_read_gb": lustre_total_read_mb / 1024 if lustre_r else None,
+        "lustre_total_write_gb": lustre_total_write_mb / 1024 if lustre_w else None,
     }
 
 

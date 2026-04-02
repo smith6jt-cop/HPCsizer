@@ -232,12 +232,12 @@ class TestDetectFlags:
         assert "node_imbalance" not in detect_flags(job)
 
     def test_idle_nodes(self):
-        # 4 nodes, 8 CPUs per node, but CPU time < single-node capacity
+        # 4 nodes, 8 total CPUs (2 per node), but CPU time < single-node capacity
         job = _make_job(
             num_nodes=4,
             req_cpus=8,
             sacct_elapsed_sec=3600,
-            sacct_cpu_time_sec=7200,  # only ~2 cores worth = far below 1 node
+            sacct_cpu_time_sec=1000,  # far below single-node capacity of 3600*2=7200
         )
         assert "idle_nodes" in detect_flags(job)
 

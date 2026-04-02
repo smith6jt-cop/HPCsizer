@@ -61,9 +61,11 @@ def detect_flags(
         elapsed = job.get("sacct_elapsed_sec") or 1
         req_cpus = job.get("req_cpus") or 1
         if cpu_time is not None and elapsed > 0 and req_cpus > 0:
+            # req_cpus (NCPUS) is total across all nodes; compute per-node
+            per_node_cpus = req_cpus / num_nodes
             # If total CPU time is less than what 1 node could produce,
             # some nodes are likely idle
-            single_node_capacity = elapsed * req_cpus
+            single_node_capacity = elapsed * per_node_cpus
             if cpu_time < single_node_capacity * 0.5:
                 flags.append("idle_nodes")
 
@@ -130,13 +132,17 @@ def detect_flags(
             if avg_meta > 100.0:
                 flags.append("lustre_metadata_heavy")
 
-        # lustre_io_dominant: most wall time spent in high Lustre I/O with low CPU
-        lustre_reads = [r.get("lustre_read_mb_s", 0) or 0 for r in timeseries]
-        if lustre_reads and cpu_fracs:
+        # lustre_io_dominant: most wall time spent in high Lustre I/O (read+write) with low CPU
+        lustre_cpu_samples = [
+            ((r.get("lustre_read_mb_s") or 0) + (r.get("lustre_write_mb_s") or 0), r["cpu_frac"])
+            for r in timeseries
+            if r.get("lustre_read_mb_s") is not None and r.get("cpu_frac") is not None
+        ]
+        if lustre_cpu_samples:
             high_lustre_io = sum(
-                1 for lr, cpu in zip(lustre_reads, cpu_fracs) if lr > 50 and cpu < 0.10
+                1 for io_rate, cpu in lustre_cpu_samples if io_rate > 50 and cpu < 0.10
             )
-            if high_lustre_io / len(timeseries) > 0.50:
+            if high_lustre_io / len(lustre_cpu_samples) > 0.50:
                 flags.append("lustre_io_dominant")
 
     return flags

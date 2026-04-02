@@ -177,7 +177,9 @@ def _summarize_timeseries(
     # Lustre metrics
     lustre_r = [r["lustre_read_mb_s"] for r in rows if r.get("lustre_read_mb_s") is not None]
     lustre_w = [r["lustre_write_mb_s"] for r in rows if r.get("lustre_write_mb_s") is not None]
-    lustre_meta = [r["lustre_metadata_ops_s"] for r in rows if r.get("lustre_metadata_ops_s") is not None]
+    lustre_meta = [
+        r["lustre_metadata_ops_s"] for r in rows if r.get("lustre_metadata_ops_s") is not None
+    ]
 
     return {
         "sidecar_peak_gb": max(rss) if rss else None,
@@ -193,9 +195,7 @@ def _summarize_timeseries(
     }
 
 
-def _load_multinode_timeseries(
-    ts_dir: str, job_id: str
-) -> Dict[str, List[Dict[str, Any]]]:
+def _load_multinode_timeseries(ts_dir: str, job_id: str) -> Dict[str, List[Dict[str, Any]]]:
     """Load per-node time-series files for a multi-node job.
 
     Looks for files matching <job_id>.node_<hostname>.csv.gz.
@@ -224,7 +224,7 @@ def _load_multinode_timeseries(
 
 
 def _compute_node_imbalance(
-    node_data: Dict[str, List[Dict[str, Any]]]
+    node_data: Dict[str, List[Dict[str, Any]]],
 ) -> Dict[str, Optional[float]]:
     """Compute cross-node imbalance metrics from per-node time-series.
 
@@ -236,7 +236,7 @@ def _compute_node_imbalance(
         return {"node_imbalance_cv": None}
 
     node_mean_cpu: List[float] = []
-    for hostname, rows in node_data.items():
+    for _hostname, rows in node_data.items():
         cpu_vals = [r.get("cpu_frac") for r in rows if r.get("cpu_frac") is not None]
         if cpu_vals:
             node_mean_cpu.append(sum(cpu_vals) / len(cpu_vals))
@@ -249,15 +249,13 @@ def _compute_node_imbalance(
         return {"node_imbalance_cv": None}
 
     variance = sum((x - mean_val) ** 2 for x in node_mean_cpu) / len(node_mean_cpu)
-    stddev = variance ** 0.5
+    stddev = variance**0.5
     cv = stddev / mean_val
 
     return {"node_imbalance_cv": round(cv, 4)}
 
 
-def _merge_multinode_timeseries(
-    node_data: Dict[str, List[Dict[str, Any]]]
-) -> List[Dict[str, Any]]:
+def _merge_multinode_timeseries(node_data: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """Merge per-node time-series into a single aggregate series.
 
     RSS and IO are summed across nodes. CPU fraction is averaged.
@@ -276,11 +274,17 @@ def _merge_multinode_timeseries(
     for i, ref_row in enumerate(ref_rows):
         row: Dict[str, Any] = {"elapsed_sec": ref_row.get("elapsed_sec")}
         # Fields to sum across nodes
-        for field in ("rss_gb", "swap_gb", "io_read_mb_s", "io_write_mb_s",
-                       "lustre_read_mb_s", "lustre_write_mb_s"):
+        for field in (
+            "rss_gb",
+            "swap_gb",
+            "io_read_mb_s",
+            "io_write_mb_s",
+            "lustre_read_mb_s",
+            "lustre_write_mb_s",
+        ):
             total = 0.0
             count = 0
-            for hostname, rows in node_data.items():
+            for _hostname, rows in node_data.items():
                 if i < len(rows) and rows[i].get(field) is not None:
                     total += rows[i][field]
                     count += 1
@@ -289,7 +293,7 @@ def _merge_multinode_timeseries(
         # Fields to take max across nodes
         for field in ("hwm_gb",):
             vals = []
-            for hostname, rows in node_data.items():
+            for _hostname, rows in node_data.items():
                 if i < len(rows) and rows[i].get(field) is not None:
                     vals.append(rows[i][field])
             row[field] = max(vals) if vals else None
@@ -297,7 +301,7 @@ def _merge_multinode_timeseries(
         # Fields to average across nodes
         for field in ("cpu_frac", "numa_miss_rate", "lustre_metadata_ops_s"):
             vals = []
-            for hostname, rows in node_data.items():
+            for _hostname, rows in node_data.items():
                 if i < len(rows) and rows[i].get(field) is not None:
                     vals.append(rows[i][field])
             row[field] = (sum(vals) / len(vals)) if vals else None
@@ -306,7 +310,7 @@ def _merge_multinode_timeseries(
         for field in ("threads", "utime", "stime", "majflt"):
             total_int = 0
             count = 0
-            for hostname, rows in node_data.items():
+            for _hostname, rows in node_data.items():
                 if i < len(rows) and rows[i].get(field) is not None:
                     total_int += int(rows[i][field])
                     count += 1

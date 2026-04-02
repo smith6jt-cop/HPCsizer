@@ -134,9 +134,7 @@ def detect_flags(
         lustre_reads = [r.get("lustre_read_mb_s", 0) or 0 for r in timeseries]
         if lustre_reads and cpu_fracs:
             high_lustre_io = sum(
-                1
-                for lr, cpu in zip(lustre_reads, cpu_fracs)
-                if lr > 50 and cpu < 0.10
+                1 for lr, cpu in zip(lustre_reads, cpu_fracs) if lr > 50 and cpu < 0.10
             )
             if high_lustre_io / len(timeseries) > 0.50:
                 flags.append("lustre_io_dominant")

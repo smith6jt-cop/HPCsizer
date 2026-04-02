@@ -65,9 +65,12 @@ class TestRecommend:
 
     def test_db_source_when_sufficient_data(self, tmp_path):
         db = str(tmp_path / "full.db")
+        from datetime import datetime
+
         from lib.db import init_db, insert_job
 
         init_db(db)
+        recent_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         for i in range(6):
             insert_job(
                 {
@@ -78,7 +81,7 @@ class TestRecommend:
                     "sidecar_peak_gb": 20.0 + i,
                     "req_mem_gb": 128.0,
                     "req_cpus": 4,
-                    "end_time": "2026-01-01T12:00:00",
+                    "end_time": recent_time,
                     "flags": "[]",
                 },
                 db_path=db,

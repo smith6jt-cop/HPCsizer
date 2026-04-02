@@ -333,16 +333,34 @@ def monitor(
                 (write_bytes - prev_write_total) / 1024**2 / wall_delta if wall_delta > 0 else 0.0
             )
 
-            lustre_read_delta = lustre["lustre_read_bytes"] - prev_lustre.get("lustre_read_bytes", lustre["lustre_read_bytes"])
-            lustre_write_delta = lustre["lustre_write_bytes"] - prev_lustre.get("lustre_write_bytes", lustre["lustre_write_bytes"])
+            lustre_read_delta = lustre["lustre_read_bytes"] - prev_lustre.get(
+                "lustre_read_bytes", lustre["lustre_read_bytes"]
+            )
+            lustre_write_delta = lustre["lustre_write_bytes"] - prev_lustre.get(
+                "lustre_write_bytes", lustre["lustre_write_bytes"]
+            )
             lustre_meta_delta = (
-                (lustre["lustre_open_count"] - prev_lustre.get("lustre_open_count", lustre["lustre_open_count"]))
-                + (lustre["lustre_close_count"] - prev_lustre.get("lustre_close_count", lustre["lustre_close_count"]))
-                + (lustre["lustre_mmap_count"] - prev_lustre.get("lustre_mmap_count", lustre["lustre_mmap_count"]))
-                + (lustre["lustre_seek_count"] - prev_lustre.get("lustre_seek_count", lustre["lustre_seek_count"]))
+                (
+                    lustre["lustre_open_count"]
+                    - prev_lustre.get("lustre_open_count", lustre["lustre_open_count"])
+                )
+                + (
+                    lustre["lustre_close_count"]
+                    - prev_lustre.get("lustre_close_count", lustre["lustre_close_count"])
+                )
+                + (
+                    lustre["lustre_mmap_count"]
+                    - prev_lustre.get("lustre_mmap_count", lustre["lustre_mmap_count"])
+                )
+                + (
+                    lustre["lustre_seek_count"]
+                    - prev_lustre.get("lustre_seek_count", lustre["lustre_seek_count"])
+                )
             )
             lustre_read_mb_s = (lustre_read_delta / 1024**2 / wall_delta) if wall_delta > 0 else 0.0
-            lustre_write_mb_s = (lustre_write_delta / 1024**2 / wall_delta) if wall_delta > 0 else 0.0
+            lustre_write_mb_s = (
+                (lustre_write_delta / 1024**2 / wall_delta) if wall_delta > 0 else 0.0
+            )
             lustre_metadata_ops_s = (lustre_meta_delta / wall_delta) if wall_delta > 0 else 0.0
 
             prev_wall = now
@@ -395,12 +413,13 @@ def monitor(
             if perf_cpi_samples:
                 perf_summary["cpi"] = sum(perf_cpi_samples) / len(perf_cpi_samples)
             if perf_cache_miss_samples:
-                perf_summary["cache_miss_rate"] = (
-                    sum(perf_cache_miss_samples) / len(perf_cache_miss_samples)
+                perf_summary["cache_miss_rate"] = sum(perf_cache_miss_samples) / len(
+                    perf_cache_miss_samples
                 )
             perf_path = output_path.replace(".csv.gz", ".perf.json")
             try:
                 import json as _json
+
                 with open(perf_path, "w") as fh:
                     _json.dump(perf_summary, fh)
             except OSError:
@@ -425,6 +444,7 @@ if __name__ == "__main__":
 
     # In multi-node mode, embed hostname in output filename
     import socket
+
     _num_nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", "1"))
     if _num_nodes > 1:
         hostname = socket.gethostname().split(".")[0]

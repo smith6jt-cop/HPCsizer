@@ -2,8 +2,6 @@
 
 import csv
 import gzip
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -20,10 +18,22 @@ from bin.finalize import (
 
 def _write_node_ts(path: str, rows: list) -> None:
     fieldnames = [
-        "elapsed_sec", "rss_gb", "hwm_gb", "swap_gb", "threads",
-        "utime", "stime", "majflt", "io_read_mb_s", "io_write_mb_s",
-        "pgmajfault", "cpu_frac", "numa_miss_rate",
-        "lustre_read_mb_s", "lustre_write_mb_s", "lustre_metadata_ops_s",
+        "elapsed_sec",
+        "rss_gb",
+        "hwm_gb",
+        "swap_gb",
+        "threads",
+        "utime",
+        "stime",
+        "majflt",
+        "io_read_mb_s",
+        "io_write_mb_s",
+        "pgmajfault",
+        "cpu_frac",
+        "numa_miss_rate",
+        "lustre_read_mb_s",
+        "lustre_write_mb_s",
+        "lustre_metadata_ops_s",
         "lustre_open_count",
     ]
     with gzip.open(path, "wt", newline="") as fh:

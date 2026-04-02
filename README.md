@@ -1,32 +1,91 @@
 # HPCsizer
 
-Automated SLURM job profiling and resource sizing. HPCsizer monitors jobs
-during execution, records resource-usage statistics, detects anomalies, builds
-per-tool regression models, and provides data-driven recommendations for memory
-and CPU requests.
+Automated SLURM job profiling and resource sizing for HPC clusters. HPCsizer
+monitors jobs during execution (including multi-node jobs), records
+resource-usage statistics, detects anomalies, builds per-tool regression
+models, and provides data-driven recommendations for memory and CPU requests.
 
-## Recent changes
+## Features
 
-* `environment.yml` added with `name: hpcsizer` (named env, not a path prefix).
-* `harvest.sh` now tries `conda env list | grep hpcsizer` before falling back
-  to `env/bin/python` or system Python.
-* `analyzer.py`: `_GRES_RE` handles typed GPUs (`gpu:a100:4`); `_FILE_PATH_RE`
-  adds `/red` and `/home`.
-* `finalize.py`: same GPU regex fix.
-* `bin/hpg`: `_apply_recommendations` preserves `--mem-per-cpu` when the
-  submission script uses it.
-* `setup.py`: switched from broken `entry_points` to `scripts=["bin/hpg"]`.
-* `finalize.py` and `harvest.sh`: sacct field changed from `CPUTime` (a billing
-  metric equal to Elapsed x AllocCPUS) to `TotalCPU` (actual user+system CPU
-  time), which fixes CPU efficiency calculations and enables the `idle_cpu` and
-  `single_threaded` anomaly flags.
-* Tests: added cases for typed GPUs, `--mem-per-cpu`, `/home` paths, `/red`
-  paths.
-* `bin/validate.py` added: replaces manual `mkdir`/`sqlite3` commands from the
-  old steps 2–3 so environment variables (`HPCSIZER_DB`, etc.) are now set in
-  the step *after* validation and testing, not before.
-* `harvest.sh`: removed `-X` flag and added two-pass parent + `.batch` merge
-  (same approach as `backfill.py`) so ongoing harvests now capture MaxRSS.
+### Sidecar monitoring
+
+A lightweight sidecar process (`monitor.py`) is injected into SLURM jobs at
+submit time. It polls `/proc` at adaptive intervals and collects:
+
+- **Memory**: RSS, HWM, swap (per-process, aggregated across PIDs)
+- **CPU**: user time, system time, CPU fraction, thread count
+- **Disk I/O**: read/write throughput from `/proc/<pid>/io`
+- **NUMA**: miss rate from `/sys/devices/system/node/*/numastat`
+- **Lustre filesystem**: read/write byte throughput and metadata operation
+  rates from `/proc/fs/lustre/llite/*/stats` (node-level counters for
+  `/blue` and `/orange` mounts on HiPerGator)
+- **Hardware counters**: CPI (cycles per instruction) and cache miss rate
+  via `perf stat`, sampled every 5 minutes when available
+  (`perf_event_paranoid <= 1`)
+
+### Multi-node support
+
+For jobs spanning multiple nodes (`SLURM_JOB_NUM_NODES > 1`), HPCsizer
+launches the monitor on every node via `srun --overlap --ntasks-per-node=1`.
+Each node writes its own time-series file with the hostname embedded in the
+filename. At finalization, per-node data is:
+
+- Loaded and parsed independently
+- Merged into an aggregate series (RSS/IO summed, CPU averaged)
+- Analyzed for cross-node imbalance (coefficient of variation of per-node
+  mean CPU fraction)
+
+### Anomaly detection (14 flags)
+
+HPCsizer detects 14 anomaly flags across four categories:
+
+**Resource misuse:**
+- `oom_killed` — job killed by OOM
+- `mem_overrequest` — peak RSS < 25% of requested memory
+- `idle_cpu` — >50% of samples with CPU fraction < 0.05
+- `single_threaded` — effective core usage < 1.5 with >2 CPUs requested
+- `mem_spike_plateau` — peak in first 10% of runtime, then stable at <60%
+
+**I/O patterns:**
+- `io_dominant` — >50% of wall time in high disk I/O with low CPU
+- `lustre_metadata_heavy` — average Lustre metadata ops/s > 100
+- `lustre_io_dominant` — >50% of wall time in high Lustre I/O (read+write
+  > 50 MB/s) with CPU < 10%
+
+**Hardware efficiency:**
+- `high_cpi` — average cycles per instruction > 1.0
+- `cache_thrashing` — cache miss rate > 0.5
+- `numa_misplaced` — average NUMA miss rate > 0.20
+- `catastrophe` — step-function drop in CPU activity mid-job
+
+**Multi-node:**
+- `node_imbalance` — coefficient of variation of per-node CPU > 1.0
+- `idle_nodes` — total CPU time < 50% of single-node capacity
+
+### Visualization
+
+Six-panel time-series plots for each job:
+
+1. Memory RSS (GB) with requested memory line
+2. CPU fraction
+3. Disk I/O read (MB/s)
+4. Thread count
+5. Lustre I/O read + write (MB/s)
+6. NUMA miss rate with 0.20 threshold line
+
+### Recommendation engine
+
+Three-tier system: historical database median > per-tool regression model >
+cold-start heuristics. Supports Seurat, SCTransform, scanpy, Cell Ranger,
+QuPath, and generic fallbacks.
+
+### Database
+
+SQLite with WAL mode. Schema includes job metadata, resource requests, sacct
+usage, sidecar measurements, Lustre I/O totals, hardware counters (CPI,
+cache miss rate), multi-node metrics, efficiency scores, and anomaly flags.
+An idempotent `migrate_db()` function adds new columns to existing databases
+on startup.
 
 ---
 
@@ -198,18 +257,18 @@ EOF
 ## Architecture overview
 
 ```
-bin/hpg              CLI entry point (submit, recommend, report, history, plot, flags)
+bin/hpg              CLI entry point (submit, recommend, interactive, report, history, plot, flags)
 bin/backfill.py      One-time sacct backfill with .batch MaxRSS merging
 bin/validate.py      Setup and database validation checks
-bin/monitor.py       Sidecar process — polls /proc during job execution
-bin/finalize.py      Post-job collector — queries sacct, computes flags, stores to DB
+bin/monitor.py       Sidecar process — polls /proc, Lustre stats, and perf counters
+bin/finalize.py      Post-job collector — multi-node merge, sacct, flags, DB insert
 bin/scheduler.sh     Self-resubmitting SLURM job — replaces crontab
 bin/harvest.sh       Harvests sacct data every 15 minutes (called by scheduler)
 bin/update_models.py Fits per-tool linear regression models nightly (called by scheduler)
 
-lib/analyzer.py      Static analysis of sbatch scripts
-lib/db.py            SQLite database layer (WAL mode)
-lib/flags.py         Anomaly detection (8 flag types)
+lib/analyzer.py      Static analysis of sbatch scripts (language, tools, input files)
+lib/db.py            SQLite database layer (WAL mode, schema migration)
+lib/flags.py         Anomaly detection (14 flag types)
 lib/recommender.py   Three-tier recommendation engine (DB > model > heuristic)
-lib/plotter.py       Multi-panel time-series visualization
+lib/plotter.py       Six-panel time-series visualization (memory, CPU, I/O, threads, Lustre, NUMA)
 ```

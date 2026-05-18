@@ -187,6 +187,9 @@ profiles.db-shm
 timeseries/
 plots/
 env/
+# Stray SLURM per-job stdout files (in case --output=/dev/null is removed
+# or older runs left some behind in the repo root).
+slurm-*.out
 
 # Visual Studio Code
 #  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 

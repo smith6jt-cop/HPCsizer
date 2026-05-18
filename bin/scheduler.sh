@@ -30,6 +30,12 @@
 #SBATCH --qos=minimal
 # ^^^ Adjust --qos to whatever your cluster allows for small utility jobs.
 #     Remove the line if your cluster has no such QOS.
+#
+# Discard SLURM's default per-job stdout/stderr. The script re-opens its own
+# log file (scheduler.log) below, so the SLURM-managed slurm-<jobid>.out file
+# would otherwise be created (empty) in the submission directory on every run.
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 set -euo pipefail
 

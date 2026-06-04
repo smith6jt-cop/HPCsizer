@@ -46,16 +46,25 @@ FIELDS="JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timel
 
 echo "[harvest] $(date -Iseconds): querying sacct since ${START_TIME}"
 
-# Materialize sacct output before piping to Python.
+# Materialize sacct output before handing it to Python.
 # Running `sacct | python` directly races: when Python finishes reading stdin
 # and exits, the kernel can deliver SIGPIPE to sacct mid-flush, producing
 # exit status 141 under `set -o pipefail` even though the harvest succeeded.
+#
+# We must also NOT pipe the data into `python - <<'PYEOF'`: the heredoc is the
+# program for `python -`, so it occupies stdin and silently discards anything
+# piped in (Python would read an empty stdin and upsert zero jobs). Instead we
+# write the rows to a temp file and pass its path to the program via an env var.
 SACCT_OUT="$(sacct --noheader --parsable2 \
     "${ACCT_FLAG[@]}" \
     -S "${START_TIME}" \
     -o "${FIELDS}")"
 
-printf '%s\n' "$SACCT_OUT" | "$PYTHON" - <<'PYEOF'
+SACCT_FILE="$(mktemp "${TMPDIR:-/tmp}/hpcsizer-sacct.XXXXXX")"
+trap 'rm -f "$SACCT_FILE"' EXIT
+printf '%s\n' "$SACCT_OUT" > "$SACCT_FILE"
+
+HPCSIZER_SACCT_FILE="$SACCT_FILE" "$PYTHON" - <<'PYEOF'
 import sys, os, json, re
 sys.path.insert(0, os.environ.get("PYTHONPATH", "").split(":")[0])
 from lib.db import init_db, insert_job
@@ -95,7 +104,9 @@ def parse_gpus(tres):
 # Two-pass: collect parent lines, then merge .batch MaxRSS
 parents = {}
 batch_rss = {}
-for line in sys.stdin:
+with open(os.environ["HPCSIZER_SACCT_FILE"], encoding="utf-8") as _sacct_fh:
+    sacct_lines = _sacct_fh.readlines()
+for line in sacct_lines:
     line = line.strip()
     if not line or line.startswith("---"):
         continue

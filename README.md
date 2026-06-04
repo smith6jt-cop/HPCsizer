@@ -216,10 +216,20 @@ The job requests minimal resources (1 CPU, 512 MB, 5-min time limit). Each
 run resubmits itself with `--begin=now+15minutes` before doing any work, so
 the chain continues even if a single run fails.
 
-To stop the scheduler:
+As an extra safety net, every run also submits a short-lived **watchdog**
+job (`--begin=now+18minutes`, named `hpcsizer-watchdog`). The watchdog checks
+whether a primary scheduler job is still pending or running; if so it exits
+immediately, and if the chain has died it restarts it. This protects against
+the chain stopping when a single run fails *before* it can resubmit — for
+example a transient node/filesystem error that prevents SLURM from executing
+the batch script at all (exit code 126/127, elapsed only a couple of seconds).
+Because healthy watchdogs do nothing, they do not accumulate.
+
+To stop the scheduler, cancel both the primary and watchdog jobs:
 
 ```bash
 scancel --name=hpcsizer-scheduler
+scancel --name=hpcsizer-watchdog
 ```
 
 Verify it is running:

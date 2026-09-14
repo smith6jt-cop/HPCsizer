@@ -4,7 +4,7 @@
 Commands
 --------
 hpg submit <script.sbatch>         Analyze, recommend, confirm, submit with monitoring
-hpg interactive [rstudio|jupyter|vscode]  Launch interactive session with monitoring
+hpg interactive [rstudio|jupyter|vscode|bash]  Launch interactive session with monitoring
 hpg recommend <script.sbatch>      Print recommendation without submitting
 hpg report [--user USER] [--days N]  Group efficiency report
 hpg history [--user USER] [--tool TOOL]  Per-application distributional summaries
@@ -30,7 +30,7 @@ except ImportError:
 
 from lib.analyzer import analyze_script
 from lib.recommender import recommend
-from lib.db import init_db, query_jobs, get_job
+from lib.db import init_db, input_gb_from_job, query_jobs, get_job
 
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB = os.environ.get("HPCSIZER_DB", str(_REPO_ROOT / "profiles.db"))
@@ -56,6 +56,13 @@ def _format_mem(gb: Optional[float]) -> str:
     return f"{gb*1024:.0f}MB"
 
 
+def _format_walltime(minutes: Optional[int]) -> str:
+    """Render minutes as the HH:MM:SS that #SBATCH --time expects."""
+    if minutes is None:
+        return "unknown"
+    return f"{int(minutes) // 60:02d}:{int(minutes) % 60:02d}:00"
+
+
 def _print_recommendation(meta: Dict[str, Any], rec: Dict[str, Any]) -> None:
     click.echo("\n" + "=" * 60)
     click.echo("  HPCsizer Resource Recommendation")
@@ -67,6 +74,11 @@ def _print_recommendation(meta: Dict[str, Any], rec: Dict[str, Any]) -> None:
     click.echo("")
     click.echo(f"  Recommended Memory : {_format_mem(rec['mem_gb'])}")
     click.echo(f"  Recommended CPUs   : {rec['cpus']}")
+    if rec.get("time_min"):
+        click.echo(f"  Recommended Time   : {_format_walltime(rec['time_min'])} "
+                   f"(n={rec.get('time_samples', 0)})")
+    else:
+        click.echo("  Recommended Time   : unknown (too few completed jobs)")
     if rec.get("req_gpus"):
         click.echo(f"  Recommended GPUs   : {rec['req_gpus']}")
     click.echo(f"  Source             : {rec['source']} (n={rec.get('samples', 0)})")
@@ -74,8 +86,14 @@ def _print_recommendation(meta: Dict[str, Any], rec: Dict[str, Any]) -> None:
         click.echo(f"  Model R²           : {rec['r_squared']:.3f}")
     click.echo("")
     click.echo(f"  Current request    : {_format_mem(meta.get('req_mem_gb'))} mem, "
-               f"{meta.get('req_cpus', 1)} CPUs")
-    click.echo("=" * 60 + "\n")
+               f"{meta.get('req_cpus', 1)} CPUs, "
+               f"{_format_walltime(meta.get('req_time_min'))}")
+    click.echo("=" * 60)
+    for warning in rec.get("warnings", []):
+        click.echo(f"  WARNING: {warning}")
+    if rec.get("warnings"):
+        click.echo("=" * 60)
+    click.echo("")
 
 
 def _inject_sidecar(script_text: str, job_id_var: str, ts_path: str, context_path: str) -> str:
@@ -135,7 +153,9 @@ def cli() -> None:
 @click.argument("script", type=click.Path(exists=True))
 @click.option("--yes", "-y", is_flag=True, help="Submit without confirmation")
 @click.option("--as-is", is_flag=True, help="Submit with original resource requests")
-def submit(script: str, yes: bool, as_is: bool) -> None:
+@click.option("--user", default=None, help="Use only this user's job history")
+@click.option("--days", default=90, show_default=True, help="Days of history to consider")
+def submit(script: str, yes: bool, as_is: bool, user: Optional[str], days: int) -> None:
     """Analyze SCRIPT, recommend resources, then submit with monitoring."""
     _ensure_db()
     meta = analyze_script(script)
@@ -145,8 +165,19 @@ def submit(script: str, yes: bool, as_is: bool) -> None:
         meta.get("req_cpus", 1),
         meta.get("req_gpus", 0),
         db_path=_DEFAULT_DB,
+        user=user,
+        days=days,
     )
     _print_recommendation(meta, rec)
+
+    if rec.get("mem_gb") is None and not as_is:
+        # Nothing defensible to apply; don't let "use recommended" quietly mean
+        # "submit unchanged".
+        click.echo("No memory recommendation is available, so there is nothing to apply.")
+        if not yes and not click.confirm("Submit the script unchanged?", default=False):
+            click.echo("Aborted.")
+            return
+        as_is = True
 
     if not as_is:
         if not yes:
@@ -197,35 +228,64 @@ def submit(script: str, yes: bool, as_is: bool) -> None:
     sys.exit(result.returncode)
 
 
-def _apply_recommendations(script_text: str, rec: Dict[str, Any]) -> str:
-    """Overwrite #SBATCH --mem and --cpus-per-task with recommended values."""
+def _set_directive(script_text: str, pattern: str, directive: str) -> str:
+    """Replace a #SBATCH directive, or insert it if the script has none.
+
+    Plain re.sub silently returns the script unchanged when the directive is
+    absent, so accepting a recommendation applied nothing. Insert after the last
+    #SBATCH line so the new directive stays inside the header block.
+    """
     import re
-    mem_gb = rec['mem_gb']
-    cpus = rec['cpus']
-    # Preserve --mem-per-cpu if the script uses it; divide total by CPUs
-    if re.search(r"#SBATCH\s+--mem-per-cpu=", script_text):
-        per_cpu_gb = mem_gb / max(cpus, 1)
-        if per_cpu_gb >= 1:
-            mem_str = f"{per_cpu_gb:.0f}G"
-        else:
-            mem_str = f"{per_cpu_gb * 1024:.0f}M"
-        script_text = re.sub(
-            r"(#SBATCH\s+--mem-per-cpu=)\S+",
-            f"#SBATCH --mem-per-cpu={mem_str}",
-            script_text,
-        )
-    else:
-        mem_str = f"{mem_gb:.0f}G"
-        script_text = re.sub(
-            r"(#SBATCH\s+--mem=)\S+",
-            f"#SBATCH --mem={mem_str}",
-            script_text,
-        )
-    script_text = re.sub(
-        r"(#SBATCH\s+--cpus-per-task=)\d+",
-        f"#SBATCH --cpus-per-task={cpus}",
-        script_text,
+
+    if re.search(pattern, script_text):
+        return re.sub(pattern, directive, script_text)
+    lines = script_text.splitlines(keepends=True)
+    last = max(
+        (i for i, ln in enumerate(lines) if ln.lstrip().startswith("#SBATCH")),
+        default=None,
     )
+    if last is None:
+        # No header at all: insert after the shebang, or at the very top.
+        last = 0 if lines and lines[0].startswith("#!") else -1
+    lines.insert(last + 1, directive + "\n")
+    return "".join(lines)
+
+
+def _apply_recommendations(script_text: str, rec: Dict[str, Any]) -> str:
+    """Overwrite #SBATCH --mem, --cpus-per-task and --time with recommended values."""
+    import re
+    mem_gb = rec.get('mem_gb')
+    cpus = rec['cpus']
+    if mem_gb is not None:
+        # Preserve --mem-per-cpu if the script uses it; divide total by CPUs
+        if re.search(r"#SBATCH\s+--mem-per-cpu=", script_text):
+            per_cpu_gb = mem_gb / max(cpus, 1)
+            if per_cpu_gb >= 1:
+                mem_str = f"{per_cpu_gb:.0f}G"
+            else:
+                mem_str = f"{per_cpu_gb * 1024:.0f}M"
+            script_text = _set_directive(
+                script_text,
+                r"#SBATCH\s+--mem-per-cpu=\S+",
+                f"#SBATCH --mem-per-cpu={mem_str}",
+            )
+        else:
+            script_text = _set_directive(
+                script_text,
+                r"#SBATCH\s+--mem=\S+",
+                f"#SBATCH --mem={mem_gb:.0f}G",
+            )
+    script_text = _set_directive(
+        script_text,
+        r"#SBATCH\s+--cpus-per-task=\d+",
+        f"#SBATCH --cpus-per-task={cpus}",
+    )
+    if rec.get("time_min"):
+        script_text = _set_directive(
+            script_text,
+            r"#SBATCH\s+--time=\S+",
+            f"#SBATCH --time={_format_walltime(rec['time_min'])}",
+        )
     return script_text
 
 
@@ -235,8 +295,14 @@ def _apply_recommendations(script_text: str, rec: Dict[str, Any]) -> str:
 
 @cli.command("recommend")
 @click.argument("script", type=click.Path(exists=True))
-def recommend_cmd(script: str) -> None:
-    """Print resource recommendation for SCRIPT without submitting."""
+@click.option("--user", default=None, help="Use only this user's job history")
+@click.option("--days", default=90, show_default=True, help="Days of history to consider")
+def recommend_cmd(script: str, user: Optional[str], days: int) -> None:
+    """Print resource recommendation for SCRIPT without submitting.
+
+    History is pooled across all users by default, which gives more samples.
+    Pass --user to size against one person's jobs only.
+    """
     _ensure_db()
     meta = analyze_script(script)
     rec = recommend(
@@ -245,6 +311,8 @@ def recommend_cmd(script: str) -> None:
         meta.get("req_cpus", 1),
         meta.get("req_gpus", 0),
         db_path=_DEFAULT_DB,
+        user=user,
+        days=days,
     )
     _print_recommendation(meta, rec)
 
@@ -404,7 +472,7 @@ def history(user: Optional[str], tool: Optional[str], days: int) -> None:
     mems = [m for m in mems if m is not None]
     cpu_effs = [j["cpu_efficiency"] * 100 for j in jobs if j.get("cpu_efficiency") is not None]
     mem_effs = [j["mem_efficiency"] * 100 for j in jobs if j.get("mem_efficiency") is not None]
-    inputs = [j.get("total_input_gb") for j in jobs if j.get("total_input_gb")]
+    inputs = [input_gb_from_job(j) for j in jobs]
     inputs_clean = [i for i in inputs if i is not None and i > 0]
 
     _hist(runtimes, "Runtime (hrs)      ")

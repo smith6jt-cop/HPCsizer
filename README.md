@@ -75,9 +75,13 @@ Six-panel time-series plots for each job:
 
 ### Recommendation engine
 
-Three-tier system: historical database median > per-tool regression model >
-cold-start heuristics. Supports Seurat, SCTransform, scanpy, Cell Ranger,
-QuPath, and generic fallbacks.
+Three-tier system for memory and CPUs: historical database (p90 of past peak
+memory, plus 10% headroom) > per-tool regression model > cold-start heuristics.
+Supports Seurat, SCTransform, scanpy, Cell Ranger, QuPath, and generic
+fallbacks. When no tier can justify a number, none is printed.
+
+Walltime is derived separately, from the p90 elapsed time of completed jobs
+plus 50% headroom. See [docs/sizing-jobs.md](docs/sizing-jobs.md).
 
 ### Database
 
@@ -95,6 +99,74 @@ prefix in `INTERNAL_JOB_NAME_PREFIXES`, which covers all three ingest paths
 (`bin/harvest.sh`, `bin/backfill.py`, `bin/finalize.py`), and `query_jobs()`
 applies the same predicate on read. `get_job()` is deliberately unfiltered so
 a direct lookup by job ID always returns what was asked for.
+
+---
+
+## Sizing a job from your history
+
+The question HPCsizer exists to answer: *I want to run this job — what should I
+request?* Four commands, in the order you need them.
+
+```bash
+# 1. What did jobs like this actually use?
+hpg history --tool Seurat --days 180
+
+# 2. What does HPCsizer suggest for this script?
+hpg recommend my_job.sbatch
+
+# 3. Where am I over-requesting today?
+hpg report --days 90
+hpg flags --days 90
+```
+
+`hpg recommend` prints what it found alongside what your script currently asks
+for:
+
+```
+  Tools found  : SCTransform, Seurat, readRDS
+  Input data   : 22.0GB
+
+  Recommended Memory : 101.3GB
+  Recommended CPUs   : 12
+  Recommended Time   : 04:58:00 (n=14)
+  Source             : database (n=16)
+
+  Current request    : 256.0GB mem, 8 CPUs, 12:00:00
+```
+
+Translate that into directives, rounding up:
+
+```bash
+#SBATCH --mem=104G              # Recommended Memory
+#SBATCH --cpus-per-task=12      # Recommended CPUs
+#SBATCH --time=05:00:00         # Recommended Time
+```
+
+Or let HPCsizer write them and submit with monitoring attached:
+
+```bash
+hpg submit my_job.sbatch          # prompts before applying
+hpg submit my_job.sbatch --yes    # apply without prompting
+hpg submit my_job.sbatch --as-is  # keep your numbers, still monitor
+```
+
+Interactive sessions are monitored the same way:
+
+```bash
+hpg interactive rstudio --time 08:00:00 --mem 64GB --cpus 16
+```
+
+Always read the `Source` line before trusting a number — `database` means it
+came from real jobs, `heuristic` means it came from a lookup table, and
+`insufficient-data` means no number could be justified at all.
+
+**See [docs/sizing-jobs.md](docs/sizing-jobs.md)** for how each tier is
+computed, which anomaly flags are worth acting on, and what to do when the
+recommendation is weak.
+
+> **Note:** `pip install -e .` puts `hpg` on your PATH, so these commands work
+> from any directory. The `python bin/hpg …` form used in the validation guide
+> below is only needed before installation.
 
 ---
 
@@ -178,6 +250,10 @@ internal rows reappear there, the leak check reports `[FAIL]` and names the
 cause (a renamed `--job-name` in `scheduler.sh`, a new internal job, or a
 stale checkout of `backfill.py`).
 
+It then checks that the scheduler chain is still queued. `validate.py` exits
+non-zero if any check fails, so expect a non-zero exit — and a `[WARN]` about
+the chain — any time you run it while the scheduler is stopped.
+
 #### Purging pre-existing internal jobs
 
 Databases backfilled before the filter existed still hold scheduler rows.
@@ -193,14 +269,20 @@ sqlite3 "$HPCSIZER_DB" "select job_name, count(*) from jobs \
 sqlite3 "$HPCSIZER_DB" "delete from jobs where job_name like 'hpcsizer-%'; vacuum;"
 sqlite3 "$HPCSIZER_DB" "select count(*) from jobs;"
 
+bash bin/scheduler.sh                # restart the chain before validating
 python bin/validate.py --db          # expect: [OK] no HPCsizer-internal jobs
-bash bin/scheduler.sh                # restart the chain
 ```
+
+Validate *after* restarting the chain: the scheduler-liveness check reports
+`[WARN]` and exits non-zero while the chain is stopped.
 
 Interactive sessions launched by `hpg` are named `hpg-interactive-*` and are
 **not** excluded — those are real user work and stay profiled.
 
-### 7. Test the CLI commands
+### 7. Verify the CLI commands
+
+These are smoke tests against a fresh install. For using these commands to
+actually size a job, see [Sizing a job from your history](#sizing-a-job-from-your-history).
 
 ```bash
 cd "$HPCSIZER_ROOT"
@@ -232,8 +314,9 @@ echo 'Rscript analysis.R /blue/mygroup/data/counts.rds' >> /tmp/test.sbatch
 python bin/hpg recommend /tmp/test.sbatch
 ```
 
-The recommendation should now include an input-size estimate based on the
-`.rds` file size multiplied by 2.5x.
+`Input data` should now report the size of that `.rds` file instead of `0MB`.
+Only absolute paths under `/blue`, `/orange`, `/red`, `/scratch` and `/home`
+are recognised.
 
 ### 8. Start the scheduler
 

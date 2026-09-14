@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import init_db, query_jobs, upsert_tool_model
+from lib.db import init_db, input_gb_from_job, query_jobs, upsert_tool_model
 
 MIN_SAMPLES = 10  # Minimum samples to fit a model
 
@@ -48,18 +48,7 @@ def _extract_tool_jobs(jobs: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, A
 
 def _parse_input_gb(job: Dict[str, Any]) -> Optional[float]:
     """Return total input file size in GB from a job record."""
-    raw = job.get("input_files")
-    if not raw:
-        return None
-    if isinstance(raw, str):
-        try:
-            files = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return None
-    else:
-        files = raw
-    total = sum(f.get("size_gb") or 0 for f in files if isinstance(f, dict))
-    return total if total > 0 else None
+    return input_gb_from_job(job)
 
 
 def fit_model(

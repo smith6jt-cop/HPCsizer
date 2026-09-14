@@ -8,7 +8,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import get_job, get_tool_model, init_db, insert_job, query_jobs, upsert_tool_model
+from lib.db import (
+    get_connection,
+    get_job,
+    get_tool_model,
+    init_db,
+    insert_job,
+    is_internal_job,
+    query_jobs,
+    upsert_tool_model,
+)
 
 
 @pytest.fixture
@@ -124,3 +133,92 @@ def test_tool_model_upsert_updates(tmp_db):
     result = get_tool_model("scanpy", db_path=tmp_db)
     assert result["sample_count"] == 20
     assert result["r_squared"] == 0.92
+
+
+# --- HPCsizer internal-job exclusion ---
+
+
+@pytest.mark.parametrize(
+    "job_name",
+    ["hpcsizer-scheduler", "hpcsizer-watchdog", "hpcsizer-anything"],
+)
+def test_is_internal_job_true(job_name):
+    assert is_internal_job(job_name) is True
+
+
+@pytest.mark.parametrize(
+    "job_name",
+    ["seurat_test", "hpg-interactive-jupyter", "my-hpcsizer-job", "", None],
+)
+def test_is_internal_job_false(job_name):
+    assert is_internal_job(job_name) is False
+
+
+def test_insert_job_skips_internal(tmp_db):
+    insert_job(
+        {"job_id": "sched1", "user": "smith6jt", "job_name": "hpcsizer-scheduler", "flags": []},
+        db_path=tmp_db,
+    )
+    insert_job(
+        {"job_id": "wd1", "user": "smith6jt", "job_name": "hpcsizer-watchdog", "flags": []},
+        db_path=tmp_db,
+    )
+    assert get_job("sched1", db_path=tmp_db) is None
+    assert get_job("wd1", db_path=tmp_db) is None
+
+
+def test_insert_job_still_stores_real_jobs(tmp_db):
+    """Guard against an over-broad predicate swallowing real work."""
+    insert_job(
+        {"job_id": "real1", "user": "smith6jt", "job_name": "seurat_run", "flags": []},
+        db_path=tmp_db,
+    )
+    insert_job(
+        {"job_id": "real2", "user": "smith6jt", "job_name": "hpg-interactive-jupyter", "flags": []},
+        db_path=tmp_db,
+    )
+    assert get_job("real1", db_path=tmp_db) is not None
+    assert get_job("real2", db_path=tmp_db) is not None
+
+
+def _insert_bypassing_guard(db_path, job_id, job_name):
+    """Write a row directly, as pre-purge rows were written before the guard."""
+    conn = get_connection(db_path)
+    with conn:
+        conn.execute(
+            "INSERT INTO jobs (job_id, user, job_name, state, end_time) "
+            "VALUES (?, 'smith6jt', ?, 'COMPLETED', '2026-01-01T12:00:00')",
+            (job_id, job_name),
+        )
+    conn.close()
+
+
+def test_query_jobs_excludes_preexisting_internal_rows(tmp_db):
+    _insert_bypassing_guard(tmp_db, "old_sched", "hpcsizer-scheduler")
+    _insert_bypassing_guard(tmp_db, "old_real", "seurat_run")
+    ids = {j["job_id"] for j in query_jobs(days=365 * 10, db_path=tmp_db)}
+    assert ids == {"old_real"}
+
+
+def test_query_jobs_keeps_null_job_name(tmp_db):
+    """COALESCE keeps rows with a NULL job_name; a bare NOT LIKE would drop them."""
+    insert_job(
+        {
+            "job_id": "noname",
+            "user": "smith6jt",
+            "state": "COMPLETED",
+            "end_time": "2026-01-01T12:00:00",
+            "flags": [],
+        },
+        db_path=tmp_db,
+    )
+    ids = {j["job_id"] for j in query_jobs(days=365 * 10, db_path=tmp_db)}
+    assert "noname" in ids
+
+
+def test_get_job_still_returns_internal_rows(tmp_db):
+    """Direct lookup by job ID is deliberately unfiltered."""
+    _insert_bypassing_guard(tmp_db, "old_sched", "hpcsizer-scheduler")
+    result = get_job("old_sched", db_path=tmp_db)
+    assert result is not None
+    assert result["job_name"] == "hpcsizer-scheduler"

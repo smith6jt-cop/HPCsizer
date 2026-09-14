@@ -14,6 +14,24 @@ DEFAULT_DB_PATH = os.environ.get(
     str(Path(__file__).resolve().parent.parent / "profiles.db"),
 )
 
+# Job names belonging to HPCsizer's own infrastructure. These are excluded
+# from ingest and from all reporting queries: the scheduler chain submits
+# ~96 jobs/day at 512MB/1CPU for ~6s each, which would otherwise dominate
+# every efficiency statistic.
+INTERNAL_JOB_NAME_PREFIXES = ("hpcsizer-",)
+
+
+def is_internal_job(job_name: Optional[str]) -> bool:
+    """True if job_name belongs to HPCsizer's own infrastructure."""
+    if not job_name:
+        return False
+    return job_name.startswith(INTERNAL_JOB_NAME_PREFIXES)
+
+
+_INTERNAL_SQL_FILTER = " AND ".join(
+    f"COALESCE(job_name,'') NOT LIKE '{p}%'" for p in INTERNAL_JOB_NAME_PREFIXES
+)
+
 
 def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Return a SQLite connection with WAL mode and row_factory set."""
@@ -140,7 +158,13 @@ def migrate_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
 
 def insert_job(job: Dict[str, Any], db_path: str = DEFAULT_DB_PATH) -> None:
-    """Insert or replace a job record."""
+    """Insert or replace a job record.
+
+    HPCsizer's own infrastructure jobs are silently dropped here so that every
+    ingest path (harvest.sh, backfill.py, finalize.py) is covered by one guard.
+    """
+    if is_internal_job(job.get("job_name")):
+        return
     for field in ("static_tools", "runtime_tools", "input_files", "flags"):
         if field in job and isinstance(job[field], (list, dict)):
             job[field] = json.dumps(job[field])
@@ -178,6 +202,8 @@ def query_jobs(
     if tool:
         clauses.append("(static_tools LIKE ? OR runtime_tools LIKE ?)")
         params.extend([f"%{tool}%", f"%{tool}%"])
+    # exclude HPCsizer's own scheduler/harvest jobs
+    clauses.append(_INTERNAL_SQL_FILTER)
     where = " AND ".join(clauses)
     conn = get_connection(db_path)
     rows = conn.execute(

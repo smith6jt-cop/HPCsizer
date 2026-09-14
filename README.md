@@ -87,6 +87,15 @@ cache miss rate), multi-node metrics, efficiency scores, and anomaly flags.
 An idempotent `migrate_db()` function adds new columns to existing databases
 on startup.
 
+HPCsizer excludes its own infrastructure jobs. The scheduler chain submits
+`hpcsizer-scheduler` and `hpcsizer-watchdog` roughly every 15 minutes at
+512 MB / 1 CPU for a few seconds each; left in, they would dominate every
+efficiency statistic. `insert_job()` drops any job whose name starts with a
+prefix in `INTERNAL_JOB_NAME_PREFIXES`, which covers all three ingest paths
+(`bin/harvest.sh`, `bin/backfill.py`, `bin/finalize.py`), and `query_jobs()`
+applies the same predicate on read. `get_job()` is deliberately unfiltered so
+a direct lookup by job ID always returns what was asked for.
+
 ---
 
 ## Validation guide
@@ -162,8 +171,34 @@ Use `--since` to control how far back to query (default: `2026-01-01`).
 python bin/validate.py --db
 ```
 
-This prints total job count, per-user summaries, MaxRSS coverage, and anomaly
-flag distribution.
+This prints the raw total job count, a check for leaked HPCsizer-internal
+jobs, then per-user summaries, MaxRSS coverage, and anomaly flag distribution
+computed over real jobs only. The raw total stays unfiltered on purpose: if
+internal rows reappear there, the leak check reports `[FAIL]` and names the
+cause (a renamed `--job-name` in `scheduler.sh`, a new internal job, or a
+stale checkout of `backfill.py`).
+
+#### Purging pre-existing internal jobs
+
+Databases backfilled before the filter existed still hold scheduler rows.
+Pause the chain first so `vacuum` is not blocked by other writers:
+
+```bash
+scancel --name=hpcsizer-scheduler ; scancel --name=hpcsizer-watchdog
+
+# preview what will be removed
+sqlite3 "$HPCSIZER_DB" "select job_name, count(*) from jobs \
+  where job_name like 'hpcsizer-%' group by job_name;"
+
+sqlite3 "$HPCSIZER_DB" "delete from jobs where job_name like 'hpcsizer-%'; vacuum;"
+sqlite3 "$HPCSIZER_DB" "select count(*) from jobs;"
+
+python bin/validate.py --db          # expect: [OK] no HPCsizer-internal jobs
+bash bin/scheduler.sh                # restart the chain
+```
+
+Interactive sessions launched by `hpg` are named `hpg-interactive-*` and are
+**not** excluded — those are real user work and stay profiled.
 
 ### 7. Test the CLI commands
 

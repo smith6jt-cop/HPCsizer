@@ -37,6 +37,18 @@ class TestColdStartHeuristics:
         mem = _cold_start_mem(["scimap"], total_input_gb=0.0)
         assert mem == pytest.approx(16.0)  # was 1.0 GB from max(0, 0, 1.0)
 
+    def test_unknown_tool_without_input_declines_too(self):
+        """An unrecognised tool is less informative than a recognised one, so it
+        must not answer where a recognised one declines."""
+        assert _cold_start_mem([], total_input_gb=0.0) is None
+        assert _cold_start_mem(["totally_unknown"], total_input_gb=0.0) is None
+
+    def test_input_independent_tools_still_answer_without_input(self):
+        """mult == 0, baseline > 0 entries are not input-driven; keep them working."""
+        assert _cold_start_mem(["cellranger"], total_input_gb=0.0) == pytest.approx(32.0)
+        assert _cold_start_mem(["STAR"], total_input_gb=0.0) == pytest.approx(32.0)
+        assert _cold_start_mem(["salmon"], total_input_gb=0.0) == pytest.approx(16.0)
+
     def test_scanpy_memory(self):
         mem = _cold_start_mem(["scanpy"], total_input_gb=8.0)
         assert mem == pytest.approx(16.0)  # 2.0 × 8 GB
@@ -213,3 +225,86 @@ class TestWalltime:
         init_db(db)
         _seed(db, 2)
         assert recommend(["Seurat"], 0.0, db_path=db).get("time_min") is None
+
+
+class TestModelTierGuards:
+    def test_zero_model_result_is_not_a_recommendation(self, tmp_path):
+        """A fit with a negative intercept stores baseline_gb=0; with no input that
+        yields 0, which would be written as '#SBATCH --mem=0G' -- all node memory."""
+        from lib.db import upsert_tool_model
+
+        db = str(tmp_path / "zero.db")
+        init_db(db)
+        upsert_tool_model(
+            {
+                "tool": "Seurat",
+                "mem_per_input_gb": 1.5,
+                "baseline_gb": 0.0,
+                "optimal_cpus": 8,
+                "r_squared": 0.9,
+                "sample_count": 30,
+            },
+            db_path=db,
+        )
+        rec = recommend(["Seurat"], total_input_gb=0.0, db_path=db)
+        assert rec["mem_gb"] is None
+        assert rec["source"] == "insufficient-data"
+
+    def test_model_still_used_when_it_yields_a_positive_number(self, tmp_path):
+        from lib.db import upsert_tool_model
+
+        db = str(tmp_path / "model_ok.db")
+        init_db(db)
+        upsert_tool_model(
+            {
+                "tool": "Seurat",
+                "mem_per_input_gb": 1.5,
+                "baseline_gb": 0.0,
+                "optimal_cpus": 8,
+                "r_squared": 0.9,
+                "sample_count": 30,
+            },
+            db_path=db,
+        )
+        rec = recommend(["Seurat"], total_input_gb=10.0, db_path=db)
+        assert rec["source"] == "model"
+        assert rec["mem_gb"] == pytest.approx(15.0 * 1.10)
+
+    def test_user_filter_warns_that_model_tier_ignores_it(self, tmp_path):
+        from lib.db import upsert_tool_model
+
+        db = str(tmp_path / "warn.db")
+        init_db(db)
+        upsert_tool_model(
+            {
+                "tool": "Seurat",
+                "mem_per_input_gb": 1.5,
+                "baseline_gb": 4.0,
+                "optimal_cpus": 8,
+                "r_squared": 0.9,
+                "sample_count": 30,
+            },
+            db_path=db,
+        )
+        rec = recommend(["Seurat"], total_input_gb=10.0, db_path=db, user="alice")
+        assert rec["source"] == "model"
+        assert any("do not apply to the fitted-model tier" in w for w in rec["warnings"])
+
+    def test_no_filter_means_no_such_warning(self, tmp_path):
+        from lib.db import upsert_tool_model
+
+        db = str(tmp_path / "nowarn.db")
+        init_db(db)
+        upsert_tool_model(
+            {
+                "tool": "Seurat",
+                "mem_per_input_gb": 1.5,
+                "baseline_gb": 4.0,
+                "optimal_cpus": 8,
+                "r_squared": 0.9,
+                "sample_count": 30,
+            },
+            db_path=db,
+        )
+        rec = recommend(["Seurat"], total_input_gb=10.0, db_path=db)
+        assert not any("fitted-model tier" in w for w in rec["warnings"])

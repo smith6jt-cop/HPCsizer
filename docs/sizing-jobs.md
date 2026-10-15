@@ -234,6 +234,13 @@ sqlite3 "$HPCSIZER_DB" \
      from tool_models order by sample_count desc;"
 ```
 
+**`--user` or `--days` did not seem to change anything**
+
+Both filters apply to the history tier only. The fitted-model tier reads a
+precomputed `tool_models` row, which carries no user dimension and has its own
+lookback, so neither filter can narrow it. When a recommendation comes from that
+tier with a filter set, the output says so explicitly.
+
 **The recommendation looks too low**
 
 Check `n`. Five samples is the minimum and the p90 of five values is just the

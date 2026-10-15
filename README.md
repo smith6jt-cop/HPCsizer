@@ -301,11 +301,21 @@ python bin/hpg recommend tests/fixtures/sample_seurat.sbatch
 ```
 
 The `recommend` output should detect R as the language and Seurat,
-SCTransform, and FindMarkers as tools. With no sidecar data yet it will
-return cold-start heuristics.
+SCTransform, and FindMarkers as tools. On a fresh database it reports
+`Source : insufficient-data` and no memory figure — the fixture references no
+input file, so with no job history there is nothing to estimate from:
 
-To test input-file detection (and the memory-estimation multipliers), point
-the script at a real dataset on your cluster:
+```
+  Recommended Memory : unknown
+  Recommended CPUs   : 4
+  Recommended Time   : unknown (too few completed jobs)
+  Source             : insufficient-data (n=0)
+
+  Current request    : 256.0GB mem, 8 CPUs, 12:00:00
+```
+
+To test input-file detection, point the script at a real dataset on your
+cluster:
 
 ```bash
 cp tests/fixtures/sample_seurat.sbatch /tmp/test.sbatch

@@ -4,6 +4,7 @@ bin/hpg has no .py extension (it is installed as a console script), so it is
 loaded by path rather than imported normally.
 """
 
+import importlib.machinery
 import importlib.util
 import sys
 from pathlib import Path

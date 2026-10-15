@@ -60,6 +60,11 @@ def fit_model(
     """
     points: List[Tuple[float, float]] = []
     for job in jobs:
+        if job.get("state") == "OUT_OF_MEMORY":
+            # An OOM job's peak is the cap where it died -- a lower bound on what it
+            # needed, not a measurement of it. Including these biases the slope down,
+            # which is the direction that causes more OOMs.
+            continue
         peak = job.get("sidecar_peak_gb") or job.get("sacct_peak_rss_gb")
         input_gb = _parse_input_gb(job)
         if peak is not None and input_gb is not None and input_gb > 0:

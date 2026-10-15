@@ -77,10 +77,11 @@ def _cold_start_mem(
         return max(estimates)
     if total_input_gb > 0:
         return max(_GENERIC_MULTIPLIER * total_input_gb + _GENERIC_BASELINE_GB, 16.0)
-    if any(t in _COLD_START for t in tools):
-        return None
-    # No recognised tool at all: the generic baseline is independent of input size.
-    return _GENERIC_BASELINE_GB
+    # No input size and nothing baseline-driven matched. An unrecognised tool is
+    # strictly less informative than a recognised one, so it cannot be the case
+    # that recognised tools decline to answer here while unknown ones return a
+    # generic 16 GB.
+    return None
 
 
 def _cold_start_cpus(tools: List[str], req_cpus: int = 1) -> int:
@@ -101,6 +102,7 @@ MIN_SAMPLES_MODEL = 10
 # Memory headroom over the historical p90. Walltime gets more: running out of
 # memory and running out of time both kill the job, but a too-short --time wastes
 # every CPU-hour already spent, while over-asking only costs queue priority.
+_DEFAULT_DAYS = 90
 _MEM_HEADROOM = 1.10
 _WALLTIME_HEADROOM = 1.5
 _MIN_WALLTIME_MIN = 15
@@ -219,6 +221,11 @@ def _model_recommendation(
         model = get_tool_model(tool, **kwargs)
         if model and model.get("sample_count", 0) >= MIN_SAMPLES_MODEL:
             mem_gb = model["mem_per_input_gb"] * total_input_gb + model["baseline_gb"]
+            if mem_gb <= 0:
+                # A fit with a negative intercept stores baseline_gb = 0, so with no
+                # detectable input the model yields 0 -- which would print as 0MB and
+                # be written as "#SBATCH --mem=0G", i.e. all memory on the node.
+                continue
             return {
                 "mem_gb": mem_gb * _MEM_HEADROOM,
                 "cpus": model["optimal_cpus"],
@@ -242,7 +249,7 @@ def recommend(
     req_gpus: int = 0,
     db_path: Optional[str] = None,
     user: Optional[str] = None,
-    days: int = 90,
+    days: int = _DEFAULT_DAYS,
 ) -> Dict[str, Any]:
     """Return the best available resource recommendation.
 
@@ -263,6 +270,13 @@ def recommend(
             warnings.append(
                 "No input files detected, so the fitted model contributed only its "
                 "baseline; the estimate does not reflect your dataset size."
+            )
+        if rec is not None and (user or days != _DEFAULT_DAYS):
+            # tool_models rows are precomputed from pooled jobs over their own
+            # lookback and carry no user dimension, so neither filter can apply.
+            warnings.append(
+                "--user and --days do not apply to the fitted-model tier; this model "
+                "was fitted from all users' jobs over its own lookback window."
             )
     if rec is None:
         mem_gb = _cold_start_mem(tools, total_input_gb, req_cpus)

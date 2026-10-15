@@ -16,7 +16,8 @@ DEFAULT_DB_PATH = os.environ.get(
 
 # Job names belonging to HPCsizer's own infrastructure. These are excluded
 # from ingest and from all reporting queries: the scheduler chain submits
-# ~96 jobs/day at 512MB/1CPU for ~6s each, which would otherwise dominate
+# ~192 jobs/day at 512MB/1CPU for ~6s each (a successor and a watchdog every
+# 15 minutes), which would otherwise dominate
 # every efficiency statistic.
 INTERNAL_JOB_NAME_PREFIXES = ("hpcsizer-",)
 
@@ -31,6 +32,27 @@ def is_internal_job(job_name: Optional[str]) -> bool:
 _INTERNAL_SQL_FILTER = " AND ".join(
     f"COALESCE(job_name,'') NOT LIKE '{p}%'" for p in INTERNAL_JOB_NAME_PREFIXES
 )
+
+
+def input_gb_from_job(job: Dict[str, Any]) -> Optional[float]:
+    """Total input size in GB for a stored job, parsed from the input_files JSON.
+
+    There is no total_input_gb column: analyze_script() produces that key for a
+    script about to be submitted, but what lands in the jobs table is the
+    input_files list. Readers must derive the total from it.
+    """
+    raw = job.get("input_files")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            files = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    else:
+        files = raw
+    total = sum(f.get("size_gb") or 0 for f in files if isinstance(f, dict))
+    return total if total > 0 else None
 
 
 def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:

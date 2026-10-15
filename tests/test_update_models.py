@@ -95,3 +95,43 @@ class TestUpdateModels:
         update_models(db_path=db, days=3650)
         model = get_tool_model("rare_tool", db_path=db)
         assert model is None
+
+
+class TestOomJobsExcludedFromFit:
+    def test_oom_points_do_not_enter_the_fit(self):
+        """An OOM peak is the cap where the job died, not what it needed. Including
+        them drags the slope down -- the direction that causes further OOMs."""
+        clean = _make_jobs_with_model(n=12, slope=3.0, baseline=2.0, noise=0.1)
+        baseline_model = fit_model(clean)
+        assert baseline_model is not None
+
+        # Same jobs, plus OOM rows capped far below the real trend.
+        polluted = list(clean)
+        for i in range(12):
+            polluted.append(
+                {
+                    "job_id": f"oom{i}",
+                    "state": "OUT_OF_MEMORY",
+                    "static_tools": json.dumps(["Seurat"]),
+                    "input_files": json.dumps(
+                        [{"path": "/blue/data.rds", "size_gb": (i + 1) * 2.0}]
+                    ),
+                    "sidecar_peak_gb": 8.0,  # the cap, flat regardless of input size
+                    "req_cpus": 4,
+                    "end_time": "2026-01-01T12:00:00",
+                    "flags": "[]",
+                }
+            )
+        polluted_model = fit_model(polluted)
+        assert polluted_model is not None
+
+        assert polluted_model["sample_count"] == baseline_model["sample_count"]
+        assert polluted_model["mem_per_input_gb"] == pytest.approx(
+            baseline_model["mem_per_input_gb"]
+        )
+
+    def test_fit_still_works_when_every_job_is_oom(self):
+        oom_only = _make_jobs_with_model(n=12)
+        for job in oom_only:
+            job["state"] = "OUT_OF_MEMORY"
+        assert fit_model(oom_only) is None

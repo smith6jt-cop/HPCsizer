@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import init_db, query_jobs, upsert_tool_model
+from lib.db import init_db, input_gb_from_job, query_jobs, upsert_tool_model
 
 MIN_SAMPLES = 10  # Minimum samples to fit a model
 
@@ -48,18 +48,7 @@ def _extract_tool_jobs(jobs: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, A
 
 def _parse_input_gb(job: Dict[str, Any]) -> Optional[float]:
     """Return total input file size in GB from a job record."""
-    raw = job.get("input_files")
-    if not raw:
-        return None
-    if isinstance(raw, str):
-        try:
-            files = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return None
-    else:
-        files = raw
-    total = sum(f.get("size_gb") or 0 for f in files if isinstance(f, dict))
-    return total if total > 0 else None
+    return input_gb_from_job(job)
 
 
 def fit_model(
@@ -71,6 +60,11 @@ def fit_model(
     """
     points: List[Tuple[float, float]] = []
     for job in jobs:
+        if job.get("state") == "OUT_OF_MEMORY":
+            # An OOM job's peak is the cap where it died -- a lower bound on what it
+            # needed, not a measurement of it. Including these biases the slope down,
+            # which is the direction that causes more OOMs.
+            continue
         peak = job.get("sidecar_peak_gb") or job.get("sacct_peak_rss_gb")
         input_gb = _parse_input_gb(job)
         if peak is not None and input_gb is not None and input_gb > 0:

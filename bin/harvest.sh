@@ -38,11 +38,52 @@ if [[ -n "${HPCSIZER_ACCT:-}" ]]; then
     ACCT_FLAG=(-A "${HPCSIZER_ACCT}")
 fi
 
+# Default window, and the furthest back a resumed harvest will reach.
 LOOKBACK_MINUTES=20
-START_TIME="$(date -d "-${LOOKBACK_MINUTES} minutes" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
-             || date -v "-${LOOKBACK_MINUTES}M" '+%Y-%m-%dT%H:%M:%S')"
+MAX_LOOKBACK_MINUTES=10080  # 7 days
+LOG_DIR="${REPO_ROOT}/logs"
+STATE_FILE="${LOG_DIR}/.harvest_state"
+# Retry policy. Overridable so the test suite does not pay for real backoff.
+RETRIES="${HPCSIZER_HARVEST_RETRIES:-3}"
+RETRY_DELAY="${HPCSIZER_HARVEST_RETRY_DELAY:-5}"
+
+_ts_minutes_ago() {
+    date -d "-$1 minutes" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
+        || date -v "-$1M" '+%Y-%m-%dT%H:%M:%S'
+}
+
+# Resume from the last successful harvest rather than a fixed window.
+#
+# With a fixed 20-minute lookback on a 15-minute cadence, two consecutive
+# failures lose jobs permanently -- and harvest failed 3519 times in 6331 runs
+# over six months (a stalled shared filesystem making the Python environment
+# unreadable at startup), so consecutive failures were common. Resuming means a
+# gap of any length is backfilled by the next run that succeeds.
+START_TIME=""
+if [[ -r "$STATE_FILE" ]]; then
+    LAST_OK="$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null || true)"
+    if [[ "$LAST_OK" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+        FLOOR="$(_ts_minutes_ago "$MAX_LOOKBACK_MINUTES")"
+        # Clamp to the floor; lexical compare is valid for this timestamp format.
+        if [[ "$LAST_OK" < "$FLOOR" ]]; then
+            START_TIME="$FLOOR"
+            echo "[harvest] last success ${LAST_OK} predates the 7-day cap; resuming from ${FLOOR}"
+        else
+            START_TIME="$LAST_OK"
+        fi
+    fi
+fi
+if [[ -z "$START_TIME" ]]; then
+    START_TIME="$(_ts_minutes_ago "$LOOKBACK_MINUTES")"
+fi
 
 FIELDS="JobID,User,JobName,Account,QOS,State,Submit,Start,End,ReqMem,NCPUS,Timelimit,ReqTRES,MaxRSS,Elapsed,TotalCPU"
+
+# Captured before the query, not after: writing the post-query time as the
+# watermark would skip anything that finished while sacct was running. Resuming
+# from just before the query instead re-covers a few seconds, and the upserts
+# are idempotent, so overlap is free where a gap would be permanent.
+HARVEST_WATERMARK="$(date '+%Y-%m-%dT%H:%M:%S')"
 
 echo "[harvest] $(date -Iseconds): querying sacct since ${START_TIME}"
 
@@ -55,16 +96,13 @@ echo "[harvest] $(date -Iseconds): querying sacct since ${START_TIME}"
 # program for `python -`, so it occupies stdin and silently discards anything
 # piped in (Python would read an empty stdin and upsert zero jobs). Instead we
 # write the rows to a temp file and pass its path to the program via an env var.
-SACCT_OUT="$(sacct --noheader --parsable2 \
-    "${ACCT_FLAG[@]}" \
-    -S "${START_TIME}" \
-    -o "${FIELDS}")"
-
 SACCT_FILE="$(mktemp "${TMPDIR:-/tmp}/hpcsizer-sacct.XXXXXX")"
-trap 'rm -f "$SACCT_FILE"' EXIT
-printf '%s\n' "$SACCT_OUT" > "$SACCT_FILE"
+PY_PROG="$(mktemp "${TMPDIR:-/tmp}/hpcsizer-upsert.XXXXXX.py")"
+trap 'rm -f "$SACCT_FILE" "$PY_PROG"' EXIT
 
-HPCSIZER_SACCT_FILE="$SACCT_FILE" "$PYTHON" - <<'PYEOF'
+# The upsert program is written out once and invoked by the retry loop below,
+# rather than being a heredoc inside the loop.
+cat > "$PY_PROG" <<'UPSERT_EOF'
 import sys, os, json, re
 sys.path.insert(0, os.environ.get("PYTHONPATH", "").split(":")[0])
 from lib.db import init_db, insert_job
@@ -177,6 +215,56 @@ for job_id, data in parents.items():
     count += 1
 
 print(f"[harvest] Upserted {count} jobs ({len(batch_rss)} had .batch MaxRSS).")
-PYEOF
+UPSERT_EOF
+
+# Both the sacct query and the upsert are retried. The failures seen in practice
+# are transient -- slurmdbd briefly unreachable, or a stalled filesystem making
+# the interpreter's own stdlib unreadable -- and a single attempt turned every
+# one of them into permanently lost data.
+run_harvest() {
+    local attempt delay sacct_out
+    delay="$RETRY_DELAY"
+    for attempt in $(seq 1 "$RETRIES"); do
+        if sacct_out="$(sacct --noheader --parsable2 \
+                "${ACCT_FLAG[@]}" \
+                -S "${START_TIME}" \
+                -o "${FIELDS}")"; then
+            printf '%s\n' "$sacct_out" > "$SACCT_FILE"
+            # -I -S is deliberate, and is the fix for the dominant failure mode.
+            # Every one of the 3519 harvest failures was Python dying during
+            # site initialization, because `pip install -e .` leaves an
+            # __editable__*.pth in site-packages whose finder imports
+            # pathlib -> glob -> contextlib -> collections at interpreter
+            # startup. On a stalled shared filesystem that is fatal before the
+            # program begins. -S skips site.py (and therefore every .pth), and
+            # -I keeps the temp directory off sys.path. The program re-adds the
+            # repo root from $PYTHONPATH itself, and both it and lib/db import
+            # only the standard library, so nothing from site-packages is
+            # needed. Anything added here that needs a third-party package must
+            # revisit this.
+            if HPCSIZER_SACCT_FILE="$SACCT_FILE" "$PYTHON" -I -S "$PY_PROG"; then
+                return 0
+            fi
+        fi
+        if (( attempt < RETRIES )); then
+            echo "[harvest] attempt ${attempt}/${RETRIES} failed; retrying in ${delay}s" >&2
+            (( delay > 0 )) && sleep "$delay"
+            delay=$(( delay * 3 ))
+        fi
+    done
+    return 1
+}
+
+if ! run_harvest; then
+    echo "[harvest] ERROR: all ${RETRIES} attempts failed; window from ${START_TIME} not recorded" >&2
+    echo "[harvest]   The next successful run resumes from ${START_TIME}, so nothing is lost." >&2
+    exit 1
+fi
+
+# Advance the watermark only once the data is actually in the database.
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+if ! printf '%s\n' "$HARVEST_WATERMARK" > "$STATE_FILE" 2>/dev/null; then
+    echo "[harvest] WARNING: could not update ${STATE_FILE}; next run falls back to a ${LOOKBACK_MINUTES}m window" >&2
+fi
 
 echo "[harvest] Done."

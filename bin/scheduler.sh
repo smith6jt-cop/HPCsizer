@@ -45,7 +45,11 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=512mb
-#SBATCH --time=00:05:00
+# 30 minutes, not 5: a stalled shared filesystem blocks this script in
+# uninterruptible I/O wait, and a 5-minute limit then kills it before it can
+# queue a successor -- which is exactly how the chain died on 2026-10-14.
+# The job normally finishes in seconds; the headroom only matters during a stall.
+#SBATCH --time=00:30:00
 #SBATCH --qos=minimal
 # ^^^ Adjust --qos to whatever your cluster allows for small utility jobs.
 #     Remove the line if your cluster has no such QOS.
@@ -66,24 +70,31 @@ WATCHDOG_NAME="hpcsizer-watchdog"
 # primary has already resubmitted (and the watchdog finds it and exits).
 RESUBMIT_DELAY="now+15minutes"
 WATCHDOG_DELAY="now+18minutes"
+# A long-interval backstop, submitted a few times a day rather than every cycle.
+# A filesystem stall kills every job scheduled *inside* it, so recovery needs a
+# watchdog queued well beyond the stall window. Without this, the 2026-10-14
+# stall left the chain down for a day because the only watchdog in flight was
+# 18 minutes out and died alongside the primary.
+WATCHDOG_LONG_DELAY="now+6hours"
 # When the watchdog restarts a dead chain, start the new primary promptly.
 RESTART_DELAY="now+1minutes"
 
 MODE="${1:-primary}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${HPCSIZER_ROOT:-$(dirname "$SCRIPT_DIR")}"
-LOG_DIR="${REPO_ROOT}/logs"
-mkdir -p "$LOG_DIR"
+# squeue needs a user to filter on, and `set -u` turns a missing $USER into a
+# fatal "unbound variable" rather than a degraded health check. USER is normally
+# exported by --export=ALL, but falling back keeps the watchdog working if it is
+# not.
+SCHED_USER="${USER:-$(id -un)}"
 
-# Redirect all scheduler output to a single rolling log file.
-SCHEDULER_LOG="${LOG_DIR}/scheduler.log"
-exec >> "$SCHEDULER_LOG" 2>&1
-
-# Submit a job and echo its job id, or "FAILED". Never returns non-zero, so it
-# is safe under `set -e`. The SLURM job name is set explicitly per mode so that
-# watchdog jobs are not counted as primaries (both share this one script, and
-# therefore the same static `#SBATCH --job-name`). Args: <begin> <mode-arg> <label>
+# Submit a job and echo the outcome. Never returns non-zero, so it is safe under
+# `set -e`. The SLURM job name is set explicitly per mode so that watchdog jobs
+# are not counted as primaries (both share this one script, and therefore the
+# same static `#SBATCH --job-name`). Args: <begin> <mode-arg> <label>
+#
+# Note this touches only $0 and sbatch. Under SLURM $0 is the node-local copy of
+# the batch script, so submitting a successor needs no access to the shared
+# filesystem -- which is what makes the early resubmit below safe during a stall.
 submit_job() {
     local begin="$1" mode_arg="$2" label="$3" name jid
     if [[ "$mode_arg" == "watchdog" ]]; then
@@ -98,11 +109,47 @@ submit_job() {
     fi
 }
 
-# Count primary scheduler jobs that are pending or running. Prints an integer.
+# ── Resubmit FIRST, before touching the shared filesystem ──────────────────
+# The resubmit used to sit after mkdir/exec on $REPO_ROOT. When that filesystem
+# stalls, those two calls block in uninterruptible I/O wait, the job burns its
+# walltime and is killed, and no successor is ever queued -- the 2026-10-14
+# failure. Doing it here means a stall can cost a cycle's data but not the chain.
+# Output is buffered because the log file is not open yet.
+EARLY_LOG=""
+if [[ "$MODE" != "watchdog" ]]; then
+    EARLY_LOG="$(submit_job "$RESUBMIT_DELAY" primary scheduler 2>&1)"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${HPCSIZER_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LOG_DIR="${REPO_ROOT}/logs"
+mkdir -p "$LOG_DIR"
+
+# Redirect all scheduler output to a single rolling log file.
+SCHEDULER_LOG="${LOG_DIR}/scheduler.log"
+exec >> "$SCHEDULER_LOG" 2>&1
+
+# Count primary scheduler jobs other than this one that are pending or running.
+# Prints an integer, or "UNKNOWN" when squeue could not be consulted.
+#
+# Excluding our own job id matters: a watchdog overlapping a running primary
+# would otherwise always see >=1 and declare the chain healthy. On 2026-10-12
+# that cost a full cycle -- the 19:36:39 watchdog reported "OK: 1 primary" on a
+# chain that had already failed to queue a successor.
+#
+# "squeue failed" and "squeue returned nothing" must not be conflated either:
+# discarding stderr and counting lines made both look like zero, and zero means
+# restart. An unknown state is reported as such so callers can fail safe.
 count_primary_jobs() {
-    # -h: no header, -o %i: job id only, -t: states, --name: filter by name.
-    # grep -c . counts non-empty lines (0 when squeue returns nothing).
-    squeue -u "$USER" --name="$PRIMARY_NAME" -h -o '%i' -t PENDING,RUNNING 2>/dev/null \
+    local out status
+    out="$(squeue -u "$SCHED_USER" --name="$PRIMARY_NAME" -h -o '%i' -t PENDING,RUNNING 2>&1)"
+    status=$?
+    if (( status != 0 )); then
+        echo "UNKNOWN"
+        return 0
+    fi
+    printf '%s\n' "$out" \
+        | grep -v "^${SLURM_JOB_ID:-__none__}\(_\|$\)" \
         | grep -c . || true
 }
 
@@ -112,6 +159,15 @@ if [[ "$MODE" == "watchdog" ]]; then
     echo "----------------------------------------"
     echo "[watchdog] $(date -Iseconds): Checking chain health"
     PRIMARIES="$(count_primary_jobs)"
+    if [[ "$PRIMARIES" == "UNKNOWN" ]]; then
+        # squeue could not be reached, so the chain's state is unknown. Standing
+        # down is the safe choice: a missed restart costs one cycle and the next
+        # watchdog retries, while a restart on bad information duplicates the
+        # chain permanently.
+        echo "[watchdog] squeue unavailable — chain state unknown, standing down."
+        echo "[watchdog] $(date -Iseconds): Done."
+        exit 0
+    fi
     if [[ "$PRIMARIES" -gt 0 ]]; then
         echo "[watchdog] OK: ${PRIMARIES} primary job(s) pending/running. Chain is healthy."
         echo "[watchdog] $(date -Iseconds): Done."
@@ -124,6 +180,7 @@ if [[ "$MODE" == "watchdog" ]]; then
     # is protected until its first primary run submits a fresh watchdog.
     submit_job "$RESTART_DELAY" primary watchdog
     submit_job "$WATCHDOG_DELAY" watchdog watchdog
+    submit_job "$WATCHDOG_LONG_DELAY" watchdog watchdog
     echo "[watchdog] $(date -Iseconds): Done."
     exit 0
 fi
@@ -136,9 +193,8 @@ echo "  REPO_ROOT=${REPO_ROOT}"
 echo "  HPCSIZER_DB=${HPCSIZER_DB:-<not set, using default>}"
 echo "  HPCSIZER_ACCT=${HPCSIZER_ACCT:-<not set>}"
 
-# ── 1. Resubmit ourselves (primary) to run again in 15 minutes ─────────────
-#    We do this FIRST so the chain is not broken if later steps fail.
-submit_job "$RESUBMIT_DELAY" primary scheduler
+# ── 1. Report the resubmit that already happened above ─────────────────────
+[[ -n "$EARLY_LOG" ]] && echo "$EARLY_LOG"
 
 # ── 2. Submit an independent watchdog as a safety net ──────────────────────
 #    Submitted every cycle so the chain survives even if a primary run fails
@@ -146,6 +202,16 @@ submit_job "$RESUBMIT_DELAY" primary scheduler
 #    watchdog does nothing unless it finds the chain dead, so these do not
 #    accumulate: each healthy watchdog simply exits.
 submit_job "$WATCHDOG_DELAY" watchdog scheduler
+
+# ── 2b. Long-interval backstop, four times a day ───────────────────────────
+#    The +18min watchdog shares a stall with the primary that queued it, so it
+#    cannot recover from an outage longer than its own lead time. One queued
+#    6 hours out survives any plausible stall. Submitted only in the first
+#    15-minute window of every sixth hour, so this adds ~4 jobs/day rather
+#    than one per cycle.
+if [[ "$((10#$(date +%H) % 6))" -eq 0 && "$((10#$(date +%M)))" -lt 15 ]]; then
+    submit_job "$WATCHDOG_LONG_DELAY" watchdog scheduler
+fi
 
 # ── 3. Run harvest ─────────────────────────────────────────────────────────
 echo "[scheduler] Running harvest..."

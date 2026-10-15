@@ -211,6 +211,15 @@ export HPCSIZER_ACCT="<SLURM_ACCOUNT>"
 export HPCSIZER_ROOT="<GROUP_DIR>/hpg-sizer"
 ```
 
+> **Note:** put the conda environment on local or non-parallel storage if you
+> can, even though the repo itself lives on the group filesystem. A stalled
+> parallel filesystem makes the interpreter's own standard library unreadable
+> at startup, which is fatal before any HPCsizer code runs. In six months of
+> production logs this accounted for 3,519 of 6,331 harvest runs failing.
+> `harvest.sh` now retries and resumes from the last successful window, so a
+> stall costs time rather than data, but the environment placement is the root
+> fix.
+
 ### 4. Confirm sacct access
 
 ```bash

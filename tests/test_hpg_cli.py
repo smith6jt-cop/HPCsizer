@@ -1,11 +1,9 @@
-"""Tests for bin/hpg helpers that rewrite sbatch directives.
+"""Tests for the version 2 helpers that rewrite sbatch directives.
 
-bin/hpg has no .py extension (it is installed as a console script), so it is
-loaded by path rather than imported normally.
+These helpers are replaced by `hpg submit --apply` later in this series; until
+then the old command line lives in lib/legacy_cli.py.
 """
 
-import importlib.machinery
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -15,13 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 pytest.importorskip("click")
 
-_HPG_PATH = Path(__file__).parent.parent / "bin" / "hpg"
-_spec = importlib.util.spec_from_loader(
-    "hpg_cli", importlib.machinery.SourceFileLoader("hpg_cli", str(_HPG_PATH))
-)
-hpg = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(hpg)
-
+from lib import legacy_cli as hpg  # noqa: E402
 
 SCRIPT_WITH_DIRECTIVES = """#!/bin/bash
 #SBATCH --job-name=test

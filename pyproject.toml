@@ -16,3 +16,7 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Version 2 command line, kept verbatim until each command is replaced.
+"lib/legacy_cli.py" = ["E731"]

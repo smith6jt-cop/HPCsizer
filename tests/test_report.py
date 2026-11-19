@@ -200,7 +200,9 @@ class TestRender:
 
     def test_filters_are_named_in_the_heading(self, conf):
         rep = build(conf, [run(i) for i in range(3)], user="alice", kind="batch")
-        assert "user alice, kind batch" in report.render_text(rep).splitlines()[0]
+        assert "account mygroup, user alice, kind batch" in report.render_text(rep).splitlines()[0]
+        one = build(conf, [run(i) for i in range(3)], account="otherlab")
+        assert "account otherlab," in report.render_text(one).splitlines()[0]
 
     def test_markdown(self, conf):
         text = report.render_markdown(build(conf, mixed()))

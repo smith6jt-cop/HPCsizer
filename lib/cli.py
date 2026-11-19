@@ -600,12 +600,14 @@ def _load(
     everything, info = history.load(cfg, since_ts=now - int(reach * history.DAY))
     info["refresh"] = refresh
     since = now - int(days * history.DAY)
+    account = getattr(args, "account", None)
     window = [
         job
         for job in everything
         if (job.get("end_ts") or 0) >= since
         and (not user or job.get("user") == user)
         and (not kind or job.get("kind") == kind)
+        and (not account or job.get("account") == account)
     ]
     return window, everything, info
 
@@ -621,6 +623,7 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
         days=args.days,
         user=args.user,
         kind=args.kind,
+        account=args.account,
         top=args.top,
         watermark_ts=info["watermark_ts"],
     )
@@ -926,6 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
     def reading(p: argparse.ArgumentParser, days: Optional[float]) -> None:
         """Options shared by the commands that read stored jobs."""
         p.add_argument("--user", help="only this user's jobs")
+        p.add_argument("--account", help="only jobs charged to this Slurm account")
         if days is None:
             p.add_argument("--days", type=float, help="window in days (default: lookback_days)")
         else:

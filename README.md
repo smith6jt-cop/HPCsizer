@@ -174,7 +174,7 @@ stated under it.
 
 | Command | Shows |
 |---|---|
-| `hpg report [--user U] [--kind K] [--days N] [--format text\|md\|json\|csv] [--out FILE]` | requested against used by user, by kind of job, by family, with the suggested next request |
+| `hpg report [--user U] [--kind K] [--account A] [--days N] [--format text\|md\|json\|csv] [--out FILE]` | requested against used by user, by kind of job, by family, with the suggested next request |
 | `hpg families [--sort cores\|memory\|cpu\|jobs\|recent\|name]` | one line per job family |
 | `hpg history [FAMILY]` | the runs of a family, or your recent jobs |
 | `hpg flags [--flag F] [--jobs]` | flagged jobs by family, with the measurement behind each flag |

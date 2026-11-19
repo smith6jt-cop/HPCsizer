@@ -229,6 +229,7 @@ def build(
     kind: Optional[str] = None,
     top: int = 10,
     watermark_ts: Optional[int] = None,
+    account: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The report as data. ``jobs`` are the annotated jobs of the window, already filtered."""
     totals = summarize(jobs)
@@ -246,7 +247,7 @@ def build(
     return {
         "accounts": list(cfg.accounts),
         "window": {"days": days, "since_ts": int(now - days * 86400), "until_ts": int(now)},
-        "filters": {"user": user, "kind": kind},
+        "filters": {"user": user, "kind": kind, "account": account},
         "data": {"as_of_ts": watermark_ts},
         "totals": totals,
         "users": users,
@@ -522,7 +523,9 @@ def _heading(rep: Dict[str, Any]) -> List[str]:
         who.append("user %s" % rep["filters"]["user"])
     if rep["filters"]["kind"]:
         who.append("kind %s" % rep["filters"]["kind"])
-    scope = ", ".join(who) if who else "account %s" % (", ".join(rep["accounts"]) or "(all stored)")
+    accounts = [rep["filters"]["account"]] if rep["filters"].get("account") else rep["accounts"]
+    who.insert(0, "account %s" % (", ".join(accounts) or "(all stored)"))
+    scope = ", ".join(who)
     tot = rep["totals"]
     return [
         "HPCsizer report: %s, %s to %s (%g days)"

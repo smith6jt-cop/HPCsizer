@@ -343,6 +343,28 @@ class TestRecommend:
         assert "hpg recommend --like 51598968" in capsys.readouterr().out
 
 
+class TestAccounts:
+    def test_reports_can_be_limited_to_one_of_several_accounts(self, env, capsys):
+        """A group with two allocations: both are collected, either can be reported alone."""
+        rows = []
+        for i in range(4):
+            rows += recent(300 + i, account="mygroup", name="align")
+            rows += recent(400 + i, account="otherlab", name="segment", user="bjones")
+        env.sacct_default(rows)
+        assert hpg("harvest") == 0
+        capsys.readouterr()
+        assert hpg("report", "--no-refresh", "--format", "json") == 0
+        assert json.loads(capsys.readouterr().out)["totals"]["jobs"] == 8
+        assert hpg("report", "--no-refresh", "--account", "otherlab", "--format", "json") == 0
+        rep = json.loads(capsys.readouterr().out)
+        assert rep["totals"]["jobs"] == 4 and [u["user"] for u in rep["users"]] == ["bjones"]
+        assert rep["filters"]["account"] == "otherlab"
+        assert hpg("export", "--no-refresh", "--account", "mygroup") == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 5 and all(",mygroup," in line for line in lines[1:])
+        assert hpg("families", "--no-refresh", "--account", "nobody") == 3
+
+
 class TestPassThrough:
     def test_hpg_options_come_first(self):
         own, rest = cli.split_passthrough(

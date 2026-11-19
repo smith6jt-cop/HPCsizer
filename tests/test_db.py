@@ -189,6 +189,49 @@ class TestReadOnly:
             db.connect_ro(dbfile)
 
 
+class TestColumnsAddedLater:
+    """A database written by the first release lacks columns that were added since."""
+
+    def older(self, path):
+        os.makedirs(os.path.dirname(path))
+        conn = sqlite3.connect(path)
+        conn.executescript(db.SCHEMA)
+        conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '3')")
+        conn.execute(
+            "INSERT INTO harvest_runs(started_ts, finished_ts, n_records, n_updated) "
+            "VALUES (1, 2, 651, 649)"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_the_next_writer_adds_them_and_keeps_the_rows(self, dbfile):
+        self.older(dbfile)
+        with db.reader(dbfile) as conn:
+            last = db.last_harvest(conn)
+            assert last["n_updated"] == 649 and last.get("n_unchanged") is None
+        with db.SnapshotWriter(dbfile) as conn:
+            db.insert_harvest_run(
+                conn,
+                {"started_ts": 3, "finished_ts": 4, "deep": 0, "n_records": 5, "n_unchanged": 5},
+            )
+        with db.reader(dbfile) as conn:
+            assert db.last_harvest(conn)["n_unchanged"] == 5
+            rows = conn.execute("SELECT n_records, n_unchanged FROM harvest_runs ORDER BY id")
+            assert [tuple(r) for r in rows] == [(651, None), (5, 5)]
+
+    def test_code_of_the_first_release_still_reads_and_writes_it(self, dbfile):
+        """Somebody may run an older checkout against the same database."""
+        with db.SnapshotWriter(dbfile, allow_create=True) as conn:
+            first_release = [c for c in db.HARVEST_COLUMNS if c != "n_unchanged"]
+            conn.execute(
+                "INSERT INTO harvest_runs (%s) VALUES (%s)"
+                % (", ".join(first_release), ", ".join("?" * len(first_release))),
+                [1] * len(first_release),
+            )
+        with db.reader(dbfile) as conn:
+            assert db.last_harvest(conn)["n_unchanged"] is None
+
+
 class TestUpsert:
     def test_update_keeps_first_seen_and_replaces_steps(self, dbfile):
         job, steps = make_job(5, state="COMPLETED")

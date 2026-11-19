@@ -177,17 +177,21 @@ def render_status(st: Dict[str, Any]) -> str:
             ),
         )
         if last:
-            counted = ("n_inserted", "n_updated", "n_open", "n_internal", "n_unparsed")
-            unchanged = (last.get("n_records") or 0) - sum(last.get(k) or 0 for k in counted)
+            # A row written before unchanged records were told apart counts
+            # every record that was read again as updated.
+            seen_again = (
+                "%s already stored" % fmt_int(last.get("n_updated"))
+                if last.get("n_unchanged") is None
+                else "%s changed, %s unchanged"
+                % (fmt_int(last.get("n_updated")), fmt_int(last.get("n_unchanged")))
+            )
             row(
                 "",
-                "%s records: %s new, %s changed, %s unchanged, %s still open, %s internal, "
-                "%s unparsed, %s late"
+                "%s records: %s new, %s, %s still open, %s internal, %s unparsed, %s late"
                 % (
                     fmt_int(last.get("n_records")),
                     fmt_int(last.get("n_inserted")),
-                    fmt_int(last.get("n_updated")),
-                    fmt_int(max(unchanged, 0)),
+                    seen_again,
                     fmt_int(last.get("n_open")),
                     fmt_int(last.get("n_internal")),
                     fmt_int(last.get("n_unparsed")),

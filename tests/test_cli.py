@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -99,6 +100,32 @@ class TestStatus:
         out = capsys.readouterr().out
         assert "STATUS: OK" in out and "Last harvest" in out
         assert "smith6jt 1" in out and "bjones 1" in out
+
+    def test_counts_of_the_last_harvest(self, env, capsys):
+        """A step line that came without its job is unparsed, but it is not a record:
+        it must not be taken off the jobs that were read again unchanged."""
+        from sacct_fixture import step_row
+
+        env.sacct_default(recent(1))
+        hpg("harvest")
+        env.sacct_default(recent(1) + [step_row(999, "batch")] + recent(2))
+        hpg("harvest")
+        capsys.readouterr()
+        hpg("status", "--no-sacct")
+        out = capsys.readouterr().out
+        counts = re.search(r"2 records: 1 new, 0 changed, 1 unchanged, .* (\d+) unparsed", out)
+        assert counts and int(counts.group(1)) >= 1, out
+
+    def test_harvest_recorded_before_unchanged_records_were_told_apart(self, env, root, capsys):
+        env.sacct_default(recent(1))
+        hpg("harvest")
+        conn = sqlite3.connect(str(root / "profiles.db"))
+        conn.execute("UPDATE harvest_runs SET n_unchanged = NULL, n_updated = 649, n_records = 651")
+        conn.commit()
+        conn.close()
+        capsys.readouterr()
+        hpg("status", "--no-sacct")
+        assert "651 records: 1 new, 649 already stored, 0 still open" in capsys.readouterr().out
 
     def test_json(self, env, capsys):
         env.sacct_default(recent(1))

@@ -124,13 +124,17 @@ and tools the script uses), `input_gb` (size of the data files it names),
 ### `harvest_runs` and `meta`
 
 `harvest_runs` has one row per successful harvest: when, where, the window it
-read, and its counters (records, new, changed — the column `n_updated` —, still
-open, internal, unparsed, late, users, profiles). Every harvest reads the last
-three days again, so most records are already stored exactly as `sacct` reports
-them; those are left alone and counted as unchanged (records minus the other
-counters), and `jobs.updated_ts` is the time a row's content last changed. A
-failed harvest publishes nothing, so it leaves no row; its trace is the log and
-the age of the last row here.
+read, and its counters (records, new, changed — the column `n_updated` —,
+unchanged, still open, internal, unparsed, late, users, profiles). Every
+harvest reads the last three days again, so most records are already stored
+exactly as `sacct` reports them; those are left alone and counted as unchanged,
+and `jobs.updated_ts` is the time a row's content last changed. `n_unparsed`
+also counts step lines that came without their job line, which are not part of
+`n_records`. `n_unchanged` was added after the first release: the first harvest
+by newer code adds the column, and rows written before have it empty (their
+`n_updated` counted every record that was read again). A failed harvest
+publishes nothing, so it leaves no row; its trace is the log and the age of the
+last row here.
 
 `meta` holds `schema_version`, `watermark_ts` (time of the last successful
 harvest) and `last_deep_ts`.

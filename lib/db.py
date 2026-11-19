@@ -174,7 +174,14 @@ HARVEST_COLUMNS = (
     "n_users",
     "n_profiles",
     "parser_version",
+    "n_unchanged",
 )
+
+# Columns added to a version 3 table after its first release. Code that does
+# not know a column is not disturbed by it (every reader names what it reads or
+# takes the row as a mapping), so adding one needs no new schema version: the
+# next writer adds what is missing.
+ADDED_COLUMNS = (("harvest_runs", "n_unchanged", "INTEGER"),)
 
 MONITOR_COLUMNS = (
     "source",
@@ -357,6 +364,10 @@ def _q(columns: Sequence[str]) -> str:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table, column, declared in ADDED_COLUMNS:
+        present = {row[1] for row in conn.execute('PRAGMA table_info("%s")' % table)}
+        if column not in present:
+            conn.execute('ALTER TABLE "%s" ADD COLUMN "%s" %s' % (table, column, declared))
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),

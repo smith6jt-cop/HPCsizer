@@ -257,8 +257,8 @@ class TestCpus:
         cpus = rec_for(conf, rows, target)["cpus"]
         assert cpus["action"] == "keep" and any("hpg submit" in note for note in cpus["notes"])
 
-    def test_sessions_are_cut_from_a_profile(self, conf):
-        rows = [
+    def session_rows(self, **profile):
+        return [
             run(
                 i,
                 job_name="vscode",
@@ -266,13 +266,48 @@ class TestCpus:
                 mon_p95_cores=2.2,
                 mon_max_cores=15.0,
                 mon_n_samples=900,
+                **profile,
             )
             for i in range(6)
         ]
+
+    def test_sessions_are_cut_from_a_profile(self, conf):
+        rows = self.session_rows(mon_source="cgroup-v2", mon_coverage=0.99)
         target = R.target_from_kind("vscode", "alice", conf, Request(cpus_per_task=16))
         rec = rec_for(conf, rows, target)
         assert rec["cpus"]["suggested"] == 3 and rec["cpus"]["peak"] == 15.0
         assert rec["evidence"]["profiled"] == 6
+
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            {"mon_source": "proc", "mon_coverage": 1.0},  # the batch shell's tree, not srun's
+            {"mon_source": "cgroup-v2", "mon_coverage": 0.5},  # half the run, or 1 of 2 nodes
+            {},
+        ],
+    )
+    def test_a_profile_that_saw_part_of_the_job_cuts_nothing(self, conf, profile):
+        rows = self.session_rows(**profile)
+        target = R.target_from_kind("vscode", "alice", conf, Request(cpus_per_task=16))
+        cpus = rec_for(conf, rows, target)["cpus"]
+        assert cpus["action"] == "keep" and cpus["suggested"] == 16
+
+    def test_batch_job_whose_profile_missed_the_work_is_sized_from_accounting(self, conf):
+        """Without a cgroup the sampler follows the batch shell and sees an idle srun."""
+        rows = [
+            run(i, cpu_sec=6 * 3600.0, mon_source="proc", mon_coverage=1.0, mon_p95_cores=0.01)
+            for i in range(5)
+        ]
+        cpus = rec_for(conf, rows, named(conf, cpus_per_task=16))["cpus"]
+        assert cpus["suggested"] == 8 and "average cores in use" in cpus["basis"]
+
+    def test_sustained_cores_never_undercut_the_average(self, conf):
+        rows = [
+            run(i, cpu_sec=6 * 3600.0, mon_source="cgroup-v2", mon_coverage=1.0, mon_p95_cores=2.0)
+            for i in range(5)
+        ]
+        cpus = rec_for(conf, rows, named(conf, cpus_per_task=16))["cpus"]
+        assert cpus["suggested"] == 8, "6 cores on average x 1.25, not 2 x 1.25"
 
     def test_multi_task_jobs_are_not_resized(self, conf):
         rows = [run(i) for i in range(5)]

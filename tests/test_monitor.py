@@ -443,6 +443,34 @@ class TestSeriesFile:
 
 
 class TestSeveralNodes:
+    def once(self, tmp_path, monkeypatch, *flags):
+        """Run the sampler for one sample inside a pretend two-node job; True if it fanned out."""
+        called = []
+        tmp_path.mkdir()
+        monkeypatch.setattr(sampler, "fan_out", lambda args, environ: called.append(1) and None)
+        monkeypatch.setattr(sampler, "_stop", [signal.SIGTERM])
+        args = sampler.build_parser().parse_args(
+            [
+                "--spool",
+                str(tmp_path),
+                "--job",
+                "5",
+                "--pid",
+                str(os.getpid()),
+                "--no-node-counters",
+            ]
+            + list(flags)
+        )
+        environ = {"SLURM_JOB_NUM_NODES": "2", "SLURMD_NODENAME": "c1"}
+        assert sampler.run(args, environ) == 0 and (tmp_path / "5.c1.tsv").exists()
+        return bool(called)
+
+    def test_other_nodes_are_sampled_only_when_asked(self, tmp_path, monkeypatch):
+        """One more srun step can compete with the job's own steps: never by default."""
+        assert self.once(tmp_path / "a", monkeypatch) is False
+        assert self.once(tmp_path / "b", monkeypatch, "--fan-out") is True
+        assert self.once(tmp_path / "c", monkeypatch, "--fan-out", "--no-fan-out") is False
+
     def test_sampler_on_the_batch_node_starts_one_on_each_other_node(self, tmp_path, monkeypatch):
         calls = tmp_path / "srun.calls"
         fake = tmp_path / "bin" / "srun"

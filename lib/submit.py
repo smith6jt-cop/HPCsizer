@@ -69,6 +69,8 @@ def sampler_line(cfg: Config) -> str:
     )
     if cfg.profile_perf:
         command += " --perf"
+    if cfg.profile_multi_node:
+        command += " --fan-out"
     return "( %s </dev/null >/dev/null 2>&1 & )" % command
 
 

@@ -208,6 +208,19 @@ class TestSeveralNodes:
         )
         assert profile.summarize([a, b])["peak_mem_bytes"] == 16 * GIB
 
+    def test_profile_of_some_of_a_jobs_nodes_covers_that_share_of_it(self):
+        one = parsed(steady(30), node="c1")
+        summary = profile.summarize([one], job_elapsed_sec=290, alloc_nodes=2)
+        assert summary["coverage"] == 0.5
+        detail = json.loads(summary["summary_json"])
+        assert detail["nodes_allocated"] == 2
+        assert any("profiled on 1 of the job's 2 nodes" in note for note in detail["notes"])
+        both = profile.summarize(
+            [one, parsed(steady(30), node="c2")], job_elapsed_sec=290, alloc_nodes=2
+        )
+        assert both["coverage"] == 1.0
+        assert profile.summarize([one], job_elapsed_sec=290, alloc_nodes=1)["coverage"] == 1.0
+
     def test_idle_nodes_and_imbalance(self):
         busy = parsed(steady(20, cores=8.0), node="a")
         idle = parsed(steady(20, cores=0.0), node="b")
@@ -398,6 +411,16 @@ class TestIngest:
         stubs.sacct_default(self.job(now))
         self.write(spool, now, start=now - 90 * 86400)
         assert harvest(cfg, now)["n_profiles"] == 0
+
+    def test_two_node_job_profiled_on_one_node_is_a_lower_bound(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now, nodes=2, batch_max_rss="31457280K"))
+        self.write(spool, now, node="c1")
+        assert harvest(cfg, now)["n_profiles"] == 1
+        job = stored(cfg)["4242"]
+        assert job["mon_coverage"] == 0.5 and job["mon_peak_mem_bytes"] == 10 * GIB
+        assert job["m"]["mem_used_gb"] == pytest.approx(30, abs=0.1)
+        assert job["m"]["mem_source"] == "sacct"
+        assert job["m"]["cores_p95"] is None, "not a statement about the whole job"
 
     def test_several_nodes(self, cfg, stubs, spool, now):
         stubs.sacct_default(self.job(now, nodes=2))

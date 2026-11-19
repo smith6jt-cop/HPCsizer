@@ -475,7 +475,11 @@ def _cpus(
     for run in runs:
         m = run["m"]
         if m.get("cores_p95") is not None:
-            basis.append((m["cores_p95"], run, "cores kept busy (profile)"))
+            # The sustained count leaves out what was used before the first
+            # sample; the average does not. Whichever is larger.
+            basis.append(
+                (max(m["cores_p95"], m["cores_used"] or 0.0), run, "cores kept busy (profile)")
+            )
         elif not session and m["cores_used"] is not None:
             basis.append((m["cores_used"], run, "average cores in use"))
     res["profiled"] = sum(1 for _v, r, _w in basis if r["m"].get("cores_p95") is not None)

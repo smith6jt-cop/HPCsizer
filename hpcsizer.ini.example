@@ -60,6 +60,13 @@ session_names = vscode
 # counters of the busiest process every five minutes (needs `perf` on the
 # compute nodes and kernel.perf_event_paranoid <= 2).
 perf = no
+# A job on several nodes is profiled on the node that runs its batch script;
+# the profile then counts as a lower bound for the job. With multi_node = yes
+# the sampler starts one more sampler on each other node through
+# `srun --overlap`. That is one more job step: where steps compete for the
+# job's memory it can delay or fail the job's own srun steps. Try it on a test
+# job of your own before turning it on for the group.
+multi_node = no
 # The spool is created by the first harvest with this mode: writable by the
 # group (so members' jobs can record profiles), setgid and sticky. Use 0700 to
 # profile only your own jobs.

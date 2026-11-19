@@ -73,6 +73,20 @@ def parse(*args):
     return sbatch_opts.parse_argv(list(args))
 
 
+class TestSamplerOptions:
+    def test_other_nodes_and_perf_only_when_configured(self, conf):
+        assert "--fan-out" not in submit.sampler_line(conf) and "--perf" not in submit.sampler_line(
+            conf
+        )
+        conf.profile_multi_node = conf.profile_perf = True
+        line = submit.sampler_line(conf)
+        assert " --perf --fan-out </dev/null" in line
+
+    def test_ini_setting(self, root, stubs):
+        (root / "hpcsizer.ini").write_text("[profile]\nmulti_node = yes\n")
+        assert load_config().profile_multi_node is True
+
+
 class TestSamplerLine:
     def test_is_valid_shell_and_names_everything_by_full_path(self, conf):
         line = submit.sampler_line(conf)

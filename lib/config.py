@@ -87,6 +87,9 @@ class Config:
 
     # In-job sampler: also read perf counters of the busiest process every 5 minutes
     profile_perf: bool = False
+    # In-job sampler: on a job with several nodes, also sample the other nodes
+    # (through one more srun step, which can compete with the job's own steps)
+    profile_multi_node: bool = False
     # Mode the spool is created with: group-writable, setgid and sticky, so that
     # every member's jobs can add files and nobody can remove another's.
     spool_mode: int = 0o3770
@@ -223,6 +226,8 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         cfg.data_roots = _split(get("paths", "data_roots"))
     if get("profile", "perf"):
         cfg.profile_perf = get("profile", "perf").lower() in ("1", "yes", "true", "on")
+    if get("profile", "multi_node"):
+        cfg.profile_multi_node = get("profile", "multi_node").lower() in ("1", "yes", "true", "on")
     if get("profile", "spool_mode"):
         cfg.spool_mode = int(get("profile", "spool_mode"), 8)
 

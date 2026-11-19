@@ -144,7 +144,11 @@ def job_metrics(
         cpu_sec, cpu_source = sacct_cpu, job.get("cpu_src") or "rusage"
     cores_used = cpu_sec / elapsed if cpu_sec is not None and elapsed >= 60 else None
     cores_peak = job.get("mon_max_cores")
-    cores_p95 = job.get("mon_p95_cores")
+    # The sustained core count is a statement about the whole job. A profile
+    # that saw only part of it -- some of its run time, one of its nodes, or
+    # (without a cgroup) only the batch script's own processes and not what
+    # srun started -- cannot make it.
+    cores_p95 = job.get("mon_p95_cores") if whole_run else None
     cpu_eff = cores_used / cores_alloc if cores_used is not None and cores_alloc else None
 
     # -- time ----------------------------------------------------------------

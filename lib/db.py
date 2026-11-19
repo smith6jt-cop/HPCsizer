@@ -942,8 +942,8 @@ def upsert_context(
 def latest_job_pk(conn: sqlite3.Connection, job_id_raw: int) -> Optional[sqlite3.Row]:
     """Most recent stored incarnation of a raw job id, with what profile ingestion needs."""
     return conn.execute(
-        'SELECT id, "user", job_id, submit_ts, start_ts, end_ts, elapsed_sec, alloc_cpus, state '
-        "FROM jobs WHERE job_id_raw=? ORDER BY submit_ts DESC LIMIT 1",
+        'SELECT id, "user", job_id, submit_ts, start_ts, end_ts, elapsed_sec, alloc_cpus, '
+        "alloc_nodes, state FROM jobs WHERE job_id_raw=? ORDER BY submit_ts DESC LIMIT 1",
         (int(job_id_raw),),
     ).fetchone()
 

@@ -430,8 +430,13 @@ def summarize(
     job_start_ts: Optional[int] = None,
     job_elapsed_sec: Optional[int] = None,
     alloc_cpus: Optional[int] = None,
+    alloc_nodes: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Job-level summary of one or more nodes' series, in the columns of ``job_monitor``."""
+    """Job-level summary of one or more nodes' series, in the columns of ``job_monitor``.
+
+    ``coverage`` is the share of the job the samples saw: of its run time and,
+    for a job on several nodes, of its nodes.
+    """
     usable = [(meta, rows) for meta, rows in node_series if rows]
     if not usable:
         return None
@@ -473,6 +478,13 @@ def summarize(
     flags, notes = _notes(nodes, cores, mem, io, lustre, alloc_cpus, p95)
     if coverage is not None and coverage < 0.9:
         notes.append("the samples cover %s of the job's run time" % fmt_pct(coverage))
+    if alloc_nodes and alloc_nodes > len(nodes):
+        notes.append(
+            "profiled on %d of the job's %d nodes: a lower bound for the job as a whole"
+            % (len(nodes), alloc_nodes)
+        )
+        if coverage is not None:
+            coverage = round(coverage * len(nodes) / float(alloc_nodes), 4)
     sources = sorted({n["source"] for n in nodes})
     intervals = [n["interval_sec"] for n in nodes if n.get("interval_sec")]
     detail = {
@@ -484,6 +496,7 @@ def summarize(
         "read_bytes": total("read_bytes"),
         "write_bytes": total("write_bytes"),
         "node_imbalance_cv": node_imbalance(nodes),
+        "nodes_allocated": alloc_nodes,
         "nodes": [
             {
                 key: node.get(key)
@@ -679,6 +692,7 @@ def _ingest_series(
         job_start_ts=row["start_ts"],
         job_elapsed_sec=row["elapsed_sec"],
         alloc_cpus=row["alloc_cpus"],
+        alloc_nodes=row["alloc_nodes"],
     )
     if summary is None:
         if settled:

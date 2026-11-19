@@ -550,6 +550,11 @@ def render_job(
         )
         if job.get("mon_top_comm"):
             lines.append("  largest processes: %s" % job["mon_top_comm"])
+        if job.get("mon_source") == "proc":
+            lines.append(
+                "  - no cgroup of the job was found: these are the batch script's own processes; "
+                "what srun started is not included"
+            )
         for note in describe_profile(profile or {}):
             lines.append("  - %s" % note)
         if job.get("mon_series_path"):

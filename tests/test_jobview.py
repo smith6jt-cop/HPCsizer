@@ -225,6 +225,15 @@ class TestJob:
             "peak 12 MB of 4 GB requested (0%) for 2.5 min: "
         )
 
+    def test_process_tree_profile_says_what_it_did_not_see(self, conf):
+        job = annotated(
+            conf,
+            [run(1, mon_n_samples=13, mon_interval_sec=2.0, mon_source="proc", mon_avg_cores=0.0)],
+        )[0]
+        text = jobview.render_job(job, [])
+        assert "Profile (in-job sampler, proc)" in text
+        assert "what srun started is not included" in text
+
     def test_cpu_time_of_a_job_under_a_minute_is_not_called_unmeasured(self, conf):
         job = annotated(conf, [run(1, elapsed_sec=40, cpu_sec=39.7, alloc_cpus=2)])[0]
         text = jobview.render_job(job, [])

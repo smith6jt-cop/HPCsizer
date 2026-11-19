@@ -58,6 +58,44 @@ cp "$1" "$table"
 """
 
 
+# Commands of a real Slurm installation, and the tools the sampler shells out
+# to. No test may reach a real one: on a login node it would query -- or, with
+# scrontab, sbatch and scancel, change -- the real cluster.
+EXTERNAL_COMMANDS = frozenset(
+    """sacct sacctmgr salloc sattach sbatch sbcast scancel scontrol scrontab sdiag sinfo
+    sprio squeue sreport srun sshare sstat strigger nvidia-smi perf""".split()
+)
+
+
+@pytest.fixture(scope="session")
+def path_without_slurm(tmp_path_factory):
+    """PATH with every directory that holds one of those commands replaced by a
+    folder of links to everything else in it."""
+    farm = tmp_path_factory.mktemp("path")
+    kept = []
+    for index, folder in enumerate(os.environ.get("PATH", os.defpath).split(os.pathsep)):
+        try:
+            names = os.listdir(folder) if folder else []
+        except OSError:
+            continue
+        if not EXTERNAL_COMMANDS.intersection(names):
+            kept.append(folder)
+            continue
+        mirror = farm / str(index)
+        mirror.mkdir()
+        for name in names:
+            if name not in EXTERNAL_COMMANDS:
+                os.symlink(os.path.join(folder, name), str(mirror / name))
+        kept.append(str(mirror))
+    return os.pathsep.join(kept)
+
+
+@pytest.fixture(autouse=True)
+def no_real_slurm(path_without_slurm, monkeypatch):
+    """Every test runs with a PATH on which only stubs can answer to a Slurm command."""
+    monkeypatch.setenv("PATH", path_without_slurm)
+
+
 class Stubs:
     def __init__(self, folder: Path):
         self.dir = folder

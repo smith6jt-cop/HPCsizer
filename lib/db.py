@@ -831,13 +831,22 @@ def _insert(conn: sqlite3.Connection, table: str, columns: Sequence[str], values
     )
 
 
+def _step_key(values: Sequence[Any]) -> str:
+    return str(values[STEP_COLUMNS.index("step_id")])
+
+
 def upsert_job(
     conn: sqlite3.Connection,
     job: Mapping[str, Any],
     steps: Sequence[Mapping[str, Any]] = (),
     now: Optional[int] = None,
 ) -> str:
-    """Insert or update a job and replace its steps. Returns 'inserted' or 'updated'.
+    """Insert or update a job and replace its steps.
+
+    Returns 'inserted', 'updated' or 'unchanged'. Every harvest reads the last
+    days again, so most of what it sees is already stored exactly as sacct
+    reports it; such a row is left alone, and ``updated_ts`` is the time its
+    content last changed.
 
     Only sacct-owned columns are updated, so ``first_seen_ts`` survives and
     rows in ``job_monitor`` / ``job_context`` are untouched. (The previous
@@ -849,9 +858,17 @@ def upsert_job(
         raise ValueError("a sacct job needs job_id_raw and submit_ts")
     values = [job.get(col) for col in JOB_COLUMNS]
     existing = conn.execute(
-        "SELECT id FROM jobs WHERE job_id_raw=? AND submit_ts=?",
+        "SELECT id, %s FROM jobs WHERE job_id_raw=? AND submit_ts=?" % _q(JOB_COLUMNS),
         (job["job_id_raw"], job["submit_ts"]),
     ).fetchone()
+    if existing is not None and list(existing)[1:] == values:
+        stored_steps = conn.execute(
+            "SELECT %s FROM steps WHERE job_pk=? ORDER BY step_id" % _q(STEP_COLUMNS),
+            (existing[0],),
+        ).fetchall()
+        given = sorted(([step.get(c) for c in STEP_COLUMNS] for step in steps), key=_step_key)
+        if [list(row) for row in stored_steps] == given:
+            return "unchanged"
     update_cols = [c for c in JOB_COLUMNS if c not in ("job_id_raw", "submit_ts")]
     conn.execute(
         "INSERT INTO jobs (%s, first_seen_ts, updated_ts) VALUES (%s, ?, ?) "

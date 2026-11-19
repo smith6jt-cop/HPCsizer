@@ -201,6 +201,30 @@ class TestJob:
             and "hpg history 'alice/batch/mplx#k-spleen'" in text
         )
 
+    def test_command_is_shown_as_it_was_typed(self, conf):
+        """Accounting has the command as sbatch received it from 'hpg submit'."""
+        sampler = (
+            "( HPCSIZER=sampler exec python3 -S /blue/mygroup/hpc-sizer/bin/monitor.py "
+            "--spool /blue/mygroup/hpc-sizer/spool --pid $$ </dev/null >/dev/null 2>&1 & )"
+        )
+        wrapped, script = annotated(
+            conf,
+            [
+                run(1, job_name="wrap", submit_line="sbatch --wrap %s; sleep 150" % sampler),
+                run(2, submit_line="sbatch -c 4 /tmp/hpg-a1b2c3d4/run_mplx.sh 45"),
+            ],
+        )
+        assert "Command   sbatch --wrap sleep 150\n" in jobview.render_job(wrapped, [])
+        assert "Command   sbatch -c 4 run_mplx.sh 45\n" in jobview.render_job(script, [])
+
+    def test_a_short_job_is_not_described_in_fractions_of_an_hour(self, conf):
+        job = annotated(conf, [run(1, elapsed_sec=152, req_mem_mb=4096, peak_mem_bytes=12 << 20)])[
+            0
+        ]
+        assert jobview.flag_detail(job, "mem_overrequest").startswith(
+            "peak 12 MB of 4 GB requested (0%) for 2.5 min: "
+        )
+
     def test_unmeasured_values_say_so(self, conf):
         job = annotated(
             conf, [run(1, state="TIMEOUT", elapsed_sec=40, peak_mem_bytes=0, cpu_sec=0.01)]

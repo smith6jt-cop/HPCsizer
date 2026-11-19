@@ -58,3 +58,13 @@ class TestCsv:
         assert text.splitlines() == ["name,n,x", "a\\x0ab,-5,1.5", "'=evil(),2,"]
         rows = list(csv.reader(io.StringIO(text)))
         assert rows[1] == ["a\\x0ab", "-5", "1.5"]
+
+
+class TestSpan:
+    def test_unit_follows_the_length(self):
+        assert fmt.fmt_span(45) == "45 s"
+        assert fmt.fmt_span(152) == "2.5 min"
+        assert fmt.fmt_span(3540) == "59 min"
+        assert fmt.fmt_span(8 * 3600) == "8 h"
+        assert fmt.fmt_span(36 * 3600 + 1800) == "36.5 h"
+        assert fmt.fmt_span(None) == "-"

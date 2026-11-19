@@ -177,20 +177,21 @@ def render_status(st: Dict[str, Any]) -> str:
             ),
         )
         if last:
+            counted = ("n_inserted", "n_updated", "n_open", "n_internal", "n_unparsed")
+            unchanged = (last.get("n_records") or 0) - sum(last.get(k) or 0 for k in counted)
             row(
                 "",
-                "%s records: %s new, %s updated, %s still open, %s internal, %s unparsed, %s late"
-                % tuple(
-                    fmt_int(last.get(k))
-                    for k in (
-                        "n_records",
-                        "n_inserted",
-                        "n_updated",
-                        "n_open",
-                        "n_internal",
-                        "n_unparsed",
-                        "n_late",
-                    )
+                "%s records: %s new, %s changed, %s unchanged, %s still open, %s internal, "
+                "%s unparsed, %s late"
+                % (
+                    fmt_int(last.get("n_records")),
+                    fmt_int(last.get("n_inserted")),
+                    fmt_int(last.get("n_updated")),
+                    fmt_int(max(unchanged, 0)),
+                    fmt_int(last.get("n_open")),
+                    fmt_int(last.get("n_internal")),
+                    fmt_int(last.get("n_unparsed")),
+                    fmt_int(last.get("n_late")),
                 ),
             )
         row("Deep pass", fmt_ts(st.get("last_deep_ts")))

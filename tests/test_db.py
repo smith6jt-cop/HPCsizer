@@ -225,7 +225,27 @@ class TestUpsert:
             assert [j["job_name"] for j in found] == ["autumn", "spring"]
 
     def test_same_job_twice_is_one_row(self, dbfile):
-        assert write_jobs(dbfile, make_job(8), make_job(8)) == ["inserted", "updated"]
+        assert write_jobs(dbfile, make_job(8), make_job(8)) == ["inserted", "unchanged"]
+
+    def test_row_read_again_as_it_is_stored_is_left_alone(self, dbfile):
+        job, steps = make_job(8)
+        write_jobs(dbfile, (job, steps), now=1000)
+        assert write_jobs(dbfile, (dict(job), [dict(s) for s in steps]), now=2000) == ["unchanged"]
+        with db.reader(dbfile) as conn:
+            (row,) = db.fetch_jobs(conn)
+            assert row["updated_ts"] == 1000, "the time its content last changed"
+
+    def test_a_change_in_one_step_is_a_change(self, dbfile):
+        job, steps = make_job(8)
+        write_jobs(dbfile, (job, steps), now=1000)
+        later = [dict(s) for s in steps]
+        later[0]["max_rss_bytes"] = (later[0]["max_rss_bytes"] or 0) + 4096
+        assert write_jobs(dbfile, (job, later), now=2000) == ["updated"]
+        assert write_jobs(dbfile, (job, later[:1]), now=3000) == ["updated"], "a step is gone"
+        assert write_jobs(dbfile, (job, list(reversed(later[:1]))), now=4000) == ["unchanged"]
+        with db.reader(dbfile) as conn:
+            (row,) = db.fetch_jobs(conn)
+            assert row["updated_ts"] == 3000 and len(db.fetch_steps(conn, row["id"])) == 1
 
     def test_job_without_identity_is_rejected(self, dbfile):
         job, steps = make_job(9)

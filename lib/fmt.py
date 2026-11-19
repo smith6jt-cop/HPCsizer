@@ -133,6 +133,17 @@ def fmt_seconds(seconds: Optional[float]) -> str:
     return "%02d:%02d:%02d" % (hours, mins, secs)
 
 
+def fmt_span(seconds: Optional[float]) -> str:
+    """How long something lasted, in the unit that suits it: ``45 s``, ``2.5 min``, ``8 h``."""
+    if seconds is None:
+        return "-"
+    if seconds < 90:
+        return "%d s" % seconds
+    if seconds < 3600:
+        return "%s min" % fmt_num(seconds / 60.0)
+    return "%s h" % fmt_num(seconds / 3600.0)
+
+
 def fmt_pct(fraction: Optional[float], signed: bool = False) -> str:
     if fraction is None:
         return "-"

@@ -69,6 +69,7 @@ MAX_ROWS_FAST = 20000  # beyond this, sample every five minutes
 JOB_COMPONENT = re.compile(r"^job_(\d+)$")
 UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]")
 UNSAFE_IN_COMM = re.compile(r"[^A-Za-z0-9_.+@/=-]")
+NOT_THE_JOBS = frozenset(["slurmstepd"])  # Slurm's step daemons live in the job's cgroup
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 _stop = []
@@ -171,16 +172,29 @@ def clock_ticks():
         return 100
 
 
-def describe_processes(proc_root, pids):
-    """Count, threads, I/O and the three largest processes among ``pids``."""
+def describe_processes(proc_root, pids, own_pid=None):
+    """Count, threads, I/O and the three largest processes among ``pids``.
+
+    A job's cgroup also holds this sampler and Slurm's own step daemons. They
+    are part of what the cgroup is charged for, but they are not the job's
+    processes: they are left out here, so that the process count, the I/O and
+    the list of largest processes describe what the user ran.
+    """
     threads = 0
     rd = wr = 0
     seen_io = False
     largest = []
     count = 0
+    skipped = 0
     for pid in pids[:MAX_PIDS]:
+        if pid == own_pid:
+            skipped += 1
+            continue
         status = proc_status(proc_root, pid)
         if not status:
+            continue
+        if status.get("name") in NOT_THE_JOBS:
+            skipped += 1
             continue
         count += 1
         threads += status.get("threads", 0)
@@ -194,12 +208,12 @@ def describe_processes(proc_root, pids):
     # A process names itself: keep only characters that cannot break the line
     # this goes into, or do anything to a terminal the name is later shown on.
     top = ",".join(
-        "%s:%d" % (UNSAFE_IN_COMM.sub("_", name) or "?", rss // (1024 * 1024))
+        "%s:%d" % (UNSAFE_IN_COMM.sub("_", name) or "?", max(1, int(round(rss / 1048576.0))))
         for rss, name in largest[:3]
         if rss > 0
     )
     return {
-        "nproc": count if len(pids) <= MAX_PIDS else len(pids),
+        "nproc": count if len(pids) <= MAX_PIDS else len(pids) - skipped,
         "threads": threads,
         "rd": rd if seen_io else None,
         "wr": wr if seen_io else None,
@@ -262,7 +276,7 @@ class CgroupV2(object):
             "cpu": cpu / 1e6 if cpu is not None else None,
             "oom": events.get("oom_kill"),
         }
-        out.update(describe_processes(self.proc_root, self.pids()))
+        out.update(describe_processes(self.proc_root, self.pids(), os.getpid()))
         if out["mem"] is None and out["rss_sum"]:
             out["mem"] = out["rss_sum"]
         return out
@@ -305,7 +319,7 @@ class CgroupV1(object):
             "cpu": cpu / 1e9 if cpu is not None else None,
             "oom": oom,
         }
-        out.update(describe_processes(self.proc_root, self.pids()))
+        out.update(describe_processes(self.proc_root, self.pids(), os.getpid()))
         if out["mem"] is None and out["rss_sum"]:
             out["mem"] = out["rss_sum"]
         return out
@@ -361,7 +375,7 @@ class ProcessTree(object):
         cpu = sum(own + reaped for _ppid, own, reaped in tree.values()) / float(self.ticks)
         self.cpu_seen = max(self.cpu_seen, cpu)
         out = {"usage": None, "usage_peak": None, "cpu": self.cpu_seen, "oom": None}
-        out.update(describe_processes(self.proc_root, sorted(tree)))
+        out.update(describe_processes(self.proc_root, sorted(tree), os.getpid()))
         out["mem"] = out["rss_sum"]
         return out
 

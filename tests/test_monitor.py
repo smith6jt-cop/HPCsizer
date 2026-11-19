@@ -151,7 +151,9 @@ class TestProcessTree:
             tree = sampler.ProcessTree(os.getpid(), "/proc")
             assert child.pid in tree.members() and os.getpid() in tree.members()
             data = tree.sample()
-            assert data["mem"] > 60 * MIB and data["nproc"] >= 2
+            assert data["mem"] > 60 * MIB and data["nproc"] >= 1
+            both = sampler.describe_processes("/proc", [os.getpid(), child.pid])
+            assert both["nproc"] == 2 and data["nproc"] == 1, "the sampler does not count itself"
             first = data["cpu"]
             sum(range(2_000_000))
             assert tree.sample()["cpu"] >= first
@@ -314,6 +316,29 @@ class TestAsAProcess:
 
     def test_runs_on_the_python_of_old_compute_nodes(self):
         ast.parse(SAMPLER.read_text(), feature_version=(3, 6))
+
+
+class TestWhoseProcesses:
+    """A job's cgroup also holds the sampler and Slurm's step daemons; they are not the job's."""
+
+    def test_sampler_and_slurm_daemons_are_not_listed_or_counted(self, tmp_path):
+        proc = tmp_path / "proc"
+        fake_process(proc, 10, rss_kb=7 * 1024, name="slurmstepd", rchar=10**6)
+        fake_process(proc, 11, rss_kb=7 * 1024, name="slurmstepd", rchar=10**6)
+        fake_process(proc, 20, rss_kb=16 * 1024, name="python3", threads=1, rchar=10**7)  # sampler
+        fake_process(proc, 30, rss_kb=3 * 1024, name="slurm_script", threads=1, rchar=2000)
+        fake_process(proc, 31, rss_kb=700, name="sleep", threads=1, rchar=1000)
+        data = sampler.describe_processes(str(proc), [10, 11, 20, 30, 31], own_pid=20)
+        assert data["top"] == "slurm_script:3,sleep:1"
+        assert (data["nproc"], data["threads"], data["rd"]) == (2, 2, 3000)
+        assert data["rss_sum"] == (3 * 1024 + 700) * 1024
+
+    def test_job_that_runs_python_keeps_its_own_python(self, tmp_path):
+        proc = tmp_path / "proc"
+        fake_process(proc, 20, rss_kb=16 * 1024, name="python3")  # the sampler
+        fake_process(proc, 40, rss_kb=900 * 1024, name="python3")  # the job
+        data = sampler.describe_processes(str(proc), [20, 40], own_pid=20)
+        assert data["top"] == "python3:900" and data["nproc"] == 1
 
 
 class TestSeriesFile:

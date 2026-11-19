@@ -110,7 +110,7 @@ Summary of the in-job series, one row per profiled job.
 | `avg_cores`, `p95_cores`, `max_cores` | cores in use: mean; the value 95% of the sampled time stays under ("sustained"); busiest interval |
 | `gpu_util_max`, `gpu_mem_max_bytes` | from `nvidia-smi` |
 | `oom_kills` | processes the kernel killed inside the job for memory |
-| `top_comm` | the largest processes at the memory peak, `name:MB,...` |
+| `top_comm` | the job's largest processes at the memory peak, `name:MB,...` (the sampler itself and Slurm's `slurmstepd` are not listed) |
 | `coverage` | share of the job's run time the samples span |
 | `summary_json` | per-node figures, I/O totals, node-wide counters, notes |
 | `series_path` | where the archived series are |
@@ -124,9 +124,13 @@ and tools the script uses), `input_gb` (size of the data files it names),
 ### `harvest_runs` and `meta`
 
 `harvest_runs` has one row per successful harvest: when, where, the window it
-read, and its counters (records, new, updated, still open, internal, unparsed,
-late, users, profiles). A failed harvest publishes nothing, so it leaves no row;
-its trace is the log and the age of the last row here.
+read, and its counters (records, new, changed — the column `n_updated` —, still
+open, internal, unparsed, late, users, profiles). Every harvest reads the last
+three days again, so most records are already stored exactly as `sacct` reports
+them; those are left alone and counted as unchanged (records minus the other
+counters), and `jobs.updated_ts` is the time a row's content last changed. A
+failed harvest publishes nothing, so it leaves no row; its trace is the log and
+the age of the last row here.
 
 `meta` holds `schema_version`, `watermark_ts` (time of the last successful
 harvest) and `last_deep_ts`.
@@ -218,7 +222,7 @@ t	mem	usage	usage_peak	cpu	nproc	threads	rd	wr	gpu_util	gpu_mem	oom	top	node_lus
 | `rd`, `wr` | bytes read and written by the processes alive, cumulative per process |
 | `gpu_util`, `gpu_mem` | busiest GPU in %, memory of all the job's GPUs in bytes |
 | `oom` | out-of-memory kills so far |
-| `top` | the three largest processes, `name:MB` |
+| `top` | the job's three largest processes, `name:MB`; like `nproc`, `threads`, `rd` and `wr` it leaves out the sampler itself and Slurm's `slurmstepd`, which share the job's cgroup |
 | `node_lustre_rd`, `node_lustre_wr`, `node_lustre_meta` | **node-wide** Lustre client counters, cumulative |
 | `node_numa_hit`, `node_numa_miss` | **node-wide** NUMA allocation counters, cumulative |
 | `perf_ipc`, `perf_cmiss` | with `perf = yes`: instructions per cycle and cache misses per reference of the busiest process |

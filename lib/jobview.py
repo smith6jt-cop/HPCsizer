@@ -3,7 +3,7 @@
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from lib import metrics
-from lib.classify import collapse_digits
+from lib.classify import collapse_digits, shown_command
 from lib.fmt import (
     fmt_bytes,
     fmt_date,
@@ -14,6 +14,7 @@ from lib.fmt import (
     fmt_num,
     fmt_pct,
     fmt_seconds,
+    fmt_span,
     fmt_ts,
     table,
 )
@@ -35,7 +36,7 @@ MEM_SOURCE_TEXT = {
 def flag_detail(job: Mapping[str, Any], flag: str) -> str:
     """One flag of one job, as the measurement that raised it."""
     m = job["m"]
-    hours = m["elapsed_h"]
+    ran = fmt_span(job.get("elapsed_sec"))
     if flag == "oom":
         return "ran out of memory with %s requested after %s" % (
             fmt_gb(m["mem_req_gb"]),
@@ -44,19 +45,19 @@ def flag_detail(job: Mapping[str, Any], flag: str) -> str:
     if flag == "timeout":
         return "hit its %s limit" % fmt_minutes(m["time_req_min"])
     if flag == "mem_overrequest":
-        return "peak %s of %s requested (%s) for %s h: %s GB-h unused" % (
+        return "peak %s of %s requested (%s) for %s: %s GB-h unused" % (
             fmt_gb(m["mem_used_gb"]),
             fmt_gb(m["mem_req_gb"]),
             fmt_pct(m["mem_eff"]),
-            fmt_num(hours),
+            ran,
             fmt_hours(m["mem_gbh_unused"]),
         )
     if flag == "cpu_overrequest":
-        return "%s of %s cores busy on average (%s) for %s h: %s core-h unused" % (
+        return "%s of %s cores busy on average (%s) for %s: %s core-h unused" % (
             fmt_num(m["cores_used"]),
             fmt_int(m["cores_alloc"]),
             fmt_pct(m["cpu_eff"]),
-            fmt_num(hours),
+            ran,
             fmt_hours(m["core_h_unused"]),
         )
     if flag == "time_overrequest":
@@ -66,9 +67,9 @@ def flag_detail(job: Mapping[str, Any], flag: str) -> str:
             fmt_pct(m["time_eff"]),
         )
     if flag == "gpu_idle":
-        return "%d GPU(s) for %s h, busiest moment %s%%: %s GPU-h idle" % (
+        return "%d GPU(s) for %s, busiest moment %s%%: %s GPU-h idle" % (
             m["gpus"],
-            fmt_num(hours),
+            ran,
             fmt_num(m["gpu_util"]),
             fmt_hours(m["gpu_h_idle"]),
         )
@@ -424,7 +425,7 @@ def render_job(
         ),
     ]
     if job.get("submit_line"):
-        lines.append("Command   %s" % job["submit_line"])
+        lines.append("Command   %s" % shown_command(job["submit_line"]))
     if job.get("work_dir"):
         lines.append("Directory %s" % job["work_dir"])
     if job.get("node_list") and job.get("node_list") != "None assigned":

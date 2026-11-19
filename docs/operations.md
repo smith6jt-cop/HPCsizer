@@ -181,7 +181,7 @@ HPCsizer 3.0.0
   Database        : /blue/mygroup/hpc-sizer/profiles.db (schema 3, 392.0 KB)
   Accounts        : mygroup
   Last harvest    : 2026-11-19 18:47 (0 s ago) on login5, manual
-                    167 records: 0 new, 158 updated, 3 still open, 6 internal, 0 unparsed, 0 late
+                    167 records: 0 new, 2 changed, 156 unchanged, 3 still open, 6 internal, 0 unparsed, 0 late
   Deep pass       : 2026-11-19 18:47
   Rows            : 158 (sacct 158)
   Last 30 days    : alice 61 | bjones 48 | cchen 28 | dpatel 8

@@ -8,6 +8,7 @@ from lib.classify import (
     command_signature,
     is_session_kind,
     job_kind,
+    shown_command,
     submit_signature,
 )
 from lib.config import load_config
@@ -141,3 +142,42 @@ class TestFamily:
         a = classify(job(user="a", job_name="align"), conf)
         b = classify(job(user="b", job_name="align"), conf)
         assert a["family"] != b["family"]
+
+
+class TestShownCommand:
+    """What 'hpg job' prints as the command: what was typed, not what hpg submit made of it."""
+
+    SAMPLER = (
+        "( HPCSIZER=sampler exec python3 -S /blue/mygroup/hpc-sizer/bin/monitor.py "
+        "--spool /blue/mygroup/hpc-sizer/spool --pid $$ </dev/null >/dev/null 2>&1 & )"
+    )
+
+    def test_sampler_line_in_front_of_a_wrapped_command(self):
+        line = "sbatch --parsable --wrap %s; sleep 150" % self.SAMPLER
+        assert shown_command(line) == "sbatch --parsable --wrap sleep 150"
+        line = "sbatch --wrap=%s; python a.py && echo done" % self.SAMPLER
+        assert shown_command(line) == "sbatch --wrap=python a.py && echo done"
+
+    def test_temporary_copy_of_a_script(self):
+        line = "sbatch --mem=4G /tmp/hpg-ab12_d3x/run_mplx.sh 45 /blue/lab/data"
+        assert shown_command(line) == "sbatch --mem=4G run_mplx.sh 45 /blue/lab/data"
+        line = "sbatch /scratch/local/1234/hpg-zzzzzzzz/job.sh"
+        assert shown_command(line) == "sbatch job.sh"
+
+    def test_everything_else_is_left_as_it_is(self):
+        for line in (
+            "sbatch run_mplx.sh 45",
+            "sbatch /home/alice/hpg-notes/run.sh",
+            "sbatch --wrap ( cd /tmp && ls ); echo HPCSIZER",
+            "srun --pty bash",
+            "",
+        ):
+            assert shown_command(line) == line
+
+    def test_family_and_shown_command_agree(self, conf):
+        job = {
+            "user": "alice",
+            "job_name": "wrap",
+            "submit_line": "sbatch --wrap %s; python fit.py --n 3" % self.SAMPLER,
+        }
+        assert classify(job, conf)["name_key"] == "cmd:python:fit.py"

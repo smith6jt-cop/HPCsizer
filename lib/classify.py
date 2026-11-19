@@ -36,6 +36,21 @@ _BRACKETS = frozenset("(){}")
 # What `hpg submit` puts in front of a --wrap command to start the in-job sampler.
 SAMPLER_MARK = "HPCSIZER=sampler"
 
+_SAMPLER_PREFIX = re.compile(r"\(\s*" + re.escape(SAMPLER_MARK) + r"\b.*?&\s*\)\s*;?\s*")
+# The temporary copy of a script that `hpg submit` hands to sbatch: <tmp>/hpg-XXXXXXXX/<name>
+_SCRIPT_COPY = re.compile(r"(?<!\S)\S*/hpg-[A-Za-z0-9_]{8}/(?=[^/\s])")
+
+
+def shown_command(submit_line: str) -> str:
+    """A stored submit line without what ``hpg submit`` added to it.
+
+    Accounting records the command as sbatch received it: with the line that
+    starts the sampler in front of a ``--wrap`` command, or with the path of
+    the temporary script copy. Neither is what the user typed.
+    """
+    return _SCRIPT_COPY.sub("", _SAMPLER_PREFIX.sub("", submit_line))
+
+
 # Launchers that only run something else; the program is what follows them.
 _PASS_THROUGH = frozenset(
     "srun time nice nohup stdbuf exec command env timeout ionice taskset numactl xvfb-run".split()

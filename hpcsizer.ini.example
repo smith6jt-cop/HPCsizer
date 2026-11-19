@@ -3,6 +3,11 @@
 # Environment variables HPCSIZER_DB, HPCSIZER_ACCT, HPCSIZER_ROOT and
 # HPCSIZER_SPOOL override the matching keys here. The scheduled harvest runs
 # without your shell environment, so set the accounts in this file.
+#
+# A number that is not usable (last_n = 0, a headroom below 1, text where a
+# number belongs) is not used: every hpg command says so on standard error and
+# works with the default. Neither that nor a file that cannot be read at all
+# keeps `hpg submit` from submitting a job.
 
 [slurm]
 # Slurm account(s) whose jobs are collected, comma-separated.

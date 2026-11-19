@@ -34,7 +34,7 @@ from lib import (
     slurm,
     submit,
 )
-from lib.config import Config, load_config
+from lib.config import Config, ConfigError, load_config
 from lib.fmt import fmt_age, fmt_bytes, fmt_int, fmt_ts
 
 # Commands whose trailing arguments are sbatch's, passed through untouched:
@@ -529,26 +529,32 @@ def cmd_submit(args: argparse.Namespace, cfg: Config) -> int:
     mode = "as-is" if args.as_is else ("apply" if args.apply else "advise")
     rec: Optional[Dict[str, Any]] = None
 
-    parsed = sbatch_opts.parse_argv(sbatch_args)
-    if mode != "as-is" and submit.passes_straight_through(parsed) is None:
-        now = int(time.time())
-        try:
-            sub = analyzer.analyze_submission(sbatch_args, roots=cfg.data_roots)
-            jobs, info = history.load(cfg, since_ts=now - int(cfg.lookback_days * history.DAY))
-            target = recommender.target_from_submission(sub, user, cfg)
-            rec = recommender.recommend(target, history.History(jobs), cfg, now)
-            if rec["source"] == recommender.SOURCE_NONE:
-                _err(
-                    "hpg: no finished runs of %s yet; nothing to compare with."
-                    % target.cls["family"]
-                )
-            else:
-                _err(recommender.render_text(rec))
-                _err(data_line(info["watermark_ts"], now))
-        except OSError:
-            pass  # an unreadable script: sbatch reports that better than this could
-        except db.DatabaseError as exc:
-            _err("hpg submit: no report (%s)" % exc)
+    # Everything up to the call of sbatch is advice and convenience. Whatever
+    # fails in it -- a bug included -- the job is submitted, exactly as given.
+    try:
+        parsed = sbatch_opts.parse_argv(sbatch_args)
+        if mode != "as-is" and submit.passes_straight_through(parsed) is None:
+            now = int(time.time())
+            try:
+                sub = analyzer.analyze_submission(sbatch_args, roots=cfg.data_roots)
+                jobs, info = history.load(cfg, since_ts=now - int(cfg.lookback_days * history.DAY))
+                target = recommender.target_from_submission(sub, user, cfg)
+                rec = recommender.recommend(target, history.History(jobs), cfg, now)
+                if rec["source"] == recommender.SOURCE_NONE:
+                    _err(
+                        "hpg: no finished runs of %s yet; nothing to compare with."
+                        % target.cls["family"]
+                    )
+                else:
+                    _err(recommender.render_text(rec))
+                    _err(data_line(info["watermark_ts"], now))
+            except OSError:
+                pass  # an unreadable script: sbatch reports that better than this could
+            except db.DatabaseError as exc:
+                _err("hpg submit: no report (%s)" % exc)
+    except Exception as exc:  # noqa: BLE001
+        rec = None
+        _err("hpg submit: no report (%s: %s)" % (type(exc).__name__, exc))
 
     changes: Dict[str, str] = {}
     if mode == "apply":
@@ -563,10 +569,17 @@ def cmd_submit(args: argparse.Namespace, cfg: Config) -> int:
             if answer in ("n", "no"):
                 changes = {}
 
-    plan = submit.prepare(sbatch_args, cfg, profile=not args.no_profile, changes=changes)
-    plan.recommendation = rec
-    for line in submit.describe(plan, rec, mode):
-        _err(line)
+    try:
+        plan = submit.prepare(sbatch_args, cfg, profile=not args.no_profile, changes=changes)
+        plan.recommendation = rec
+        for line in submit.describe(plan, rec, mode):
+            _err(line)
+    except Exception as exc:  # noqa: BLE001
+        plan = submit.Plan(sbatch_args)
+        _err(
+            "hpg submit: submitting exactly as given, unprofiled (%s: %s)"
+            % (type(exc).__name__, exc)
+        )
     return submit.run_sbatch(cfg, plan, user)
 
 
@@ -1065,7 +1078,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not getattr(args, "func", None):
         parser.print_help()
         return EXIT_USAGE
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        _err("hpg: %s" % exc)
+        if args.command in ("submit", "sbatch"):
+            _err("hpg submit: submitting exactly as given, without report or profile")
+            return submit.submit_as_given(passed_through)
+        return EXIT_ERROR
+    for problem in cfg.problems:
+        _err("hpg: %s" % problem)
     try:
         return int(args.func(args, cfg))
     except db.DatabaseError as exc:

@@ -330,7 +330,7 @@ def select_evidence(
         )
         need = cfg.min_runs_pooled if level in POOLED_LEVELS else cfg.min_runs
         tried.append((level, count, need))
-        if count >= need:
+        if runs and count >= need:
             return level, runs, count, tried
     return None, [], 0, tried
 

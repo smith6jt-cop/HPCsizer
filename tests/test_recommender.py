@@ -34,6 +34,18 @@ def rec_for(conf, rows, target=None, **kwargs):
     return R.recommend(target or named(conf), hist(conf, rows), conf, NOW, **kwargs)
 
 
+class TestSettingsThatMakeNoSense:
+    """The configuration refuses these; the sizing code must not crash on them either."""
+
+    @pytest.mark.parametrize("setting", [{"last_n": 0}, {"min_runs": 0}, {"min_runs_pooled": 0}])
+    def test_no_runs_is_no_evidence(self, conf, setting):
+        for key, value in setting.items():
+            setattr(conf, key, value)
+        rec = rec_for(conf, [run(i) for i in range(5)])
+        assert rec["source"] in (R.SOURCE_NONE, R.SOURCE_HISTORY)
+        assert rec_for(conf, [], named(conf, name="never-ran"))["source"] == R.SOURCE_NONE
+
+
 class TestEvidenceLevels:
     def test_exact_name_is_preferred(self, conf):
         rows = [run(i) for i in range(3)]

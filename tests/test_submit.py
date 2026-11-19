@@ -13,6 +13,7 @@ import pytest
 from sacct_fixture import simple_job
 
 from lib import classify, cli, sbatch_opts, submit
+from lib import cli as submit_cli
 from lib.config import load_config
 
 REPO = Path(__file__).resolve().parent.parent
@@ -485,6 +486,67 @@ class TestWholeLoop:
         assert job["mon_peak_mem_bytes"] > 50 * 1024 * 1024
         assert job["metrics"]["mem_source"] == "profile", "a 4-second job accounting cannot measure"
         assert json.loads(job["ctx_tools_json"]) == ["time"] and job["ctx_script_hash"]
+
+
+class TestNothingStopsASubmission:
+    """Whatever goes wrong in hpg's own steps, the job is handed to sbatch as it was given."""
+
+    def as_given(self, stubs):
+        args = sent(stubs)
+        return len(args) == 2 and args[0] == "run_mplx.sh" and args[1] == "s1"
+
+    def test_an_error_in_the_report_step(self, stored, stubs, capsys, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("a bug in the sizing code")
+
+        monkeypatch.setattr(submit_cli.recommender, "recommend", boom)
+        assert cli.main(["submit", "--no-profile", "run_mplx.sh", "s1"]) == 0
+        out, err = capsys.readouterr()
+        assert out == "Submitted batch job 777\n" and self.as_given(stubs)
+        assert "no report" in err and "a bug in the sizing code" in err and "Traceback" not in err
+
+    def test_an_error_while_preparing_the_profile(self, stored, stubs, capsys, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("a bug in the injection code")
+
+        monkeypatch.setattr(submit, "prepare", boom)
+        assert cli.main(["submit", "run_mplx.sh", "s1"]) == 0
+        out, err = capsys.readouterr()
+        assert out == "Submitted batch job 777\n" and self.as_given(stubs)
+        assert "exactly as given" in err and "Traceback" not in err
+
+    def test_an_error_after_sbatch_has_answered(self, stored, stubs, capsys, monkeypatch):
+        """The job exists by then: a failure to record it must not look like a failed submission."""
+
+        def boom(*_args, **_kwargs):
+            raise TypeError("cannot describe the submission")
+
+        monkeypatch.setattr(submit, "context_payload", boom)
+        assert cli.main(["submit", "--no-profile", "run_mplx.sh", "s1"]) == 0
+        assert capsys.readouterr().out == "Submitted batch job 777\n"
+
+    @pytest.mark.parametrize("line", ["last_n = 0", "min_runs = 0", "last_n = many"])
+    def test_a_policy_value_that_makes_no_sense(self, stored, root, stubs, capsys, line):
+        (root / "hpcsizer.ini").write_text(
+            "[slurm]\ncompute_python = %s\n[policy]\n%s\n" % (sys.executable, line)
+        )
+        assert cli.main(["submit", "--no-profile", "run_mplx.sh", "s1"]) == 0
+        out, err = capsys.readouterr()
+        assert out == "Submitted batch job 777\n" and self.as_given(stubs)
+        assert line.split()[0] in err and "Traceback" not in err
+
+    def test_a_configuration_file_that_cannot_be_read(self, stored, root, stubs, capsys):
+        (root / "hpcsizer.ini").write_text("this is not an ini file\n[[[\n")
+        assert cli.main(["submit", "run_mplx.sh", "s1"]) == 0
+        out, err = capsys.readouterr()
+        assert out == "Submitted batch job 777\n" and self.as_given(stubs)
+        assert "hpcsizer.ini" in err and "Traceback" not in err
+
+    def test_other_commands_say_what_is_wrong_with_the_file(self, stored, root, capsys):
+        (root / "hpcsizer.ini").write_text("this is not an ini file\n[[[\n")
+        assert cli.main(["report"]) == 1
+        err = capsys.readouterr().err
+        assert "hpcsizer.ini" in err and "Traceback" not in err
 
 
 class TestContextFile:

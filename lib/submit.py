@@ -356,10 +356,33 @@ def run_sbatch(
     out.write(done.stdout or "")
     out.flush()
     if done.returncode == 0 and plan.submission is not None:
-        job_id = job_id_from(done.stdout or "")
-        if job_id and not sbatch_opts.parse_argv(plan.final).has("test-only"):
-            if spool_problem(cfg) is None:
-                write_context(cfg, job_id, context_payload(plan, job_id, user))
+        # The job exists now. Recording what was submitted is a convenience for
+        # later sizing; no failure in it may make the submission look failed.
+        try:
+            job_id = job_id_from(done.stdout or "")
+            if job_id and not sbatch_opts.parse_argv(plan.final).has("test-only"):
+                if spool_problem(cfg) is None:
+                    write_context(cfg, job_id, context_payload(plan, job_id, user))
+        except Exception:  # noqa: BLE001
+            pass
+    return int(done.returncode)
+
+
+def submit_as_given(args: Sequence[str], sbatch: str = "sbatch") -> int:
+    """Hand ``args`` to sbatch untouched; its output and exit status are the caller's.
+
+    The way out when HPCsizer itself cannot run (no readable configuration):
+    the job must still be submitted.
+    """
+    try:
+        done = subprocess.run(
+            [sbatch] + list(args), stdout=subprocess.PIPE, universal_newlines=True
+        )
+    except FileNotFoundError:
+        print("hpg submit: '%s' not found; is Slurm on PATH?" % sbatch, file=sys.stderr)
+        return 127
+    sys.stdout.write(done.stdout or "")
+    sys.stdout.flush()
     return int(done.returncode)
 
 

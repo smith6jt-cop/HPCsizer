@@ -143,7 +143,20 @@ class TestPolicies:
         assert by["custom"]["mem"]["gbh_suggested"] == 5 * 64 + 5 * 20
         assert by["custom"]["description"] == "mem_headroom=2, min_runs=5"
 
-    @pytest.mark.parametrize("bad", ["mem_headroom", "sacct=x", "mem_headroom=lots", "db_path=/x"])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "mem_headroom",
+            "sacct=x",
+            "mem_headroom=lots",
+            "db_path=/x",
+            "last_n=0",
+            "min_runs=0",
+            "mem_headroom=nan",
+            "mem_headroom=0.5",
+            "time_percentile=2",
+        ],
+    )
     def test_bad_settings(self, conf, bad):
         with pytest.raises(ValueError):
             backtest.parse_settings([bad], conf)

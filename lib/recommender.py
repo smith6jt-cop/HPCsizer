@@ -13,7 +13,7 @@ returned at all -- an invented figure is worse than an explicit "unknown".
 
 from typing import Any, Dict, List, Optional
 
-from lib.db import get_tool_model, query_jobs
+from lib.legacy_db import get_tool_model, query_jobs
 
 # ---------------------------------------------------------------------------
 # Cold-start heuristics

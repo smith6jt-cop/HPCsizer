@@ -34,9 +34,9 @@ def env(tmp_path):
     (root / "bin").mkdir(parents=True)
     shutil.copy(SCHEDULER, root / "bin" / "scheduler.sh")
     shutil.copy(HARVEST, root / "bin" / "harvest.sh")
-    # harvest.sh imports lib.db via $PYTHONPATH
+    # harvest.sh imports lib.legacy_db via $PYTHONPATH
     (root / "lib").mkdir()
-    for f in ("__init__.py", "db.py"):
+    for f in ("__init__.py", "legacy_db.py"):
         src = REPO / "lib" / f
         if src.exists():
             shutil.copy(src, root / "lib" / f)

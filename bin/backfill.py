@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lib.db import init_db, insert_job
+from lib.legacy_db import init_db, insert_job
 
 FIELDS = (
     "JobID,User,JobName,Account,QOS,State,Submit,Start,End,"

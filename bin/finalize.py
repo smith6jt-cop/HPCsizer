@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional
 # Allow importing lib from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import init_db, insert_job
 from lib.flags import compute_efficiency, detect_flags
+from lib.legacy_db import init_db, insert_job
 from lib.plotter import load_timeseries
 
 _DEFAULT_DB = os.environ.get(

@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import get_connection, init_db
+from lib.legacy_db import get_connection, init_db
 from lib.recommender import _cold_start_cpus, _cold_start_mem, recommend
 
 
@@ -77,7 +77,7 @@ class TestColdStartHeuristics:
 class TestRecommend:
     def test_returns_dict_with_required_keys(self, tmp_path):
         db = str(tmp_path / "test.db")
-        from lib.db import init_db
+        from lib.legacy_db import init_db
 
         init_db(db)
         rec = recommend(["Seurat"], total_input_gb=10.0, db_path=db)
@@ -87,7 +87,7 @@ class TestRecommend:
 
     def test_heuristic_source_when_no_db_data(self, tmp_path):
         db = str(tmp_path / "empty.db")
-        from lib.db import init_db
+        from lib.legacy_db import init_db
 
         init_db(db)
         rec = recommend(["Seurat"], total_input_gb=5.0, db_path=db)
@@ -97,7 +97,7 @@ class TestRecommend:
         db = str(tmp_path / "full.db")
         from datetime import datetime
 
-        from lib.db import init_db, insert_job
+        from lib.legacy_db import init_db, insert_job
 
         init_db(db)
         recent_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -136,7 +136,7 @@ class TestRecommend:
 
     def test_model_source_when_model_exists(self, tmp_path):
         db = str(tmp_path / "model.db")
-        from lib.db import init_db, upsert_tool_model
+        from lib.legacy_db import init_db, upsert_tool_model
 
         init_db(db)
         upsert_tool_model(
@@ -231,7 +231,7 @@ class TestModelTierGuards:
     def test_zero_model_result_is_not_a_recommendation(self, tmp_path):
         """A fit with a negative intercept stores baseline_gb=0; with no input that
         yields 0, which would be written as '#SBATCH --mem=0G' -- all node memory."""
-        from lib.db import upsert_tool_model
+        from lib.legacy_db import upsert_tool_model
 
         db = str(tmp_path / "zero.db")
         init_db(db)
@@ -251,7 +251,7 @@ class TestModelTierGuards:
         assert rec["source"] == "insufficient-data"
 
     def test_model_still_used_when_it_yields_a_positive_number(self, tmp_path):
-        from lib.db import upsert_tool_model
+        from lib.legacy_db import upsert_tool_model
 
         db = str(tmp_path / "model_ok.db")
         init_db(db)
@@ -271,7 +271,7 @@ class TestModelTierGuards:
         assert rec["mem_gb"] == pytest.approx(15.0 * 1.10)
 
     def test_user_filter_warns_that_model_tier_ignores_it(self, tmp_path):
-        from lib.db import upsert_tool_model
+        from lib.legacy_db import upsert_tool_model
 
         db = str(tmp_path / "warn.db")
         init_db(db)
@@ -291,7 +291,7 @@ class TestModelTierGuards:
         assert any("do not apply to the fitted-model tier" in w for w in rec["warnings"])
 
     def test_no_filter_means_no_such_warning(self, tmp_path):
-        from lib.db import upsert_tool_model
+        from lib.legacy_db import upsert_tool_model
 
         db = str(tmp_path / "nowarn.db")
         init_db(db)

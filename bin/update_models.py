@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.db import init_db, input_gb_from_job, query_jobs, upsert_tool_model
+from lib.legacy_db import init_db, input_gb_from_job, query_jobs, upsert_tool_model
 
 MIN_SAMPLES = 10  # Minimum samples to fit a model
 

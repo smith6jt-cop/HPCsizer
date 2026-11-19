@@ -105,7 +105,7 @@ trap 'rm -f "$SACCT_FILE" "$PY_PROG"' EXIT
 cat > "$PY_PROG" <<'UPSERT_EOF'
 import sys, os, json, re
 sys.path.insert(0, os.environ.get("PYTHONPATH", "").split(":")[0])
-from lib.db import init_db, insert_job
+from lib.legacy_db import init_db, insert_job
 
 DB_PATH = os.environ.get("HPCSIZER_DB", "profiles.db")
 init_db(DB_PATH)

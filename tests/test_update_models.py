@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from bin.update_models import fit_model, update_models
-from lib.db import get_tool_model, init_db, insert_job
+from lib.legacy_db import get_tool_model, init_db, insert_job
 
 
 def _make_jobs_with_model(n=15, slope=3.0, baseline=2.0, noise=0.5):

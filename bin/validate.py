@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lib.db import (
+from lib.legacy_db import (
     _INTERNAL_SQL_FILTER,
     DEFAULT_DB_PATH,
     INTERNAL_JOB_NAME_PREFIXES,

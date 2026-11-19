@@ -17,12 +17,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sacct_fixture import stream  # noqa: E402
 
 from lib.config import load_config  # noqa: E402
+from lib.slurm import FIELDS  # noqa: E402
 
 # Each call consumes the first line of $STUB_DIR/sacct.plan:
 #   fail        -> exit 1 with an error on stderr
 #   <filename>  -> print $STUB_DIR/<filename>
 # With an empty plan it prints $STUB_DIR/sacct.default when that exists.
+# --helpformat (which fields this sacct has) is answered from
+# $STUB_DIR/sacct.fields and fails when that file is missing; it is neither
+# counted as a call nor does it consume the plan.
 SACCT_STUB = r"""#!/usr/bin/env bash
+if [[ "${1:-}" == "--helpformat" ]]; then
+    printf 'helpformat\n' >> "$STUB_DIR/sacct.fields.calls"
+    cat "$STUB_DIR/sacct.fields" 2>/dev/null || exit 1
+    exit 0
+fi
 printf 'sacct %s\n' "$*" >> "$STUB_DIR/sacct.calls"
 printf 'TZ=%s SLURM_TIME_FORMAT=%s\n' "${TZ:-}" "${SLURM_TIME_FORMAT:-}" >> "$STUB_DIR/sacct.env"
 plan="$STUB_DIR/sacct.plan"
@@ -112,8 +121,19 @@ class Stubs:
         (self.bin / name).unlink()
 
     # -- sacct ---------------------------------------------------------------
-    def sacct_default(self, rows) -> None:
-        (self.dir / "sacct.default").write_text(stream(rows))
+    def sacct_fields(self, names) -> None:
+        """What the stub's ``--helpformat`` prints; None makes that call fail."""
+        path = self.dir / "sacct.fields"
+        if names is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.write_text(
+                "".join("%-20s" % n + ("\n" if i % 4 == 3 else " ") for i, n in enumerate(names))
+            )
+
+    def sacct_default(self, rows, fields=FIELDS) -> None:
+        (self.dir / "sacct.default").write_text(stream(rows, fields))
 
     def sacct_file(self, name: str, rows=None, text=None) -> None:
         (self.dir / name).write_text(stream(rows) if text is None else text)
@@ -151,6 +171,7 @@ def stubs(tmp_path, monkeypatch):
     """Stub sacct on PATH; other commands are added per test with ``install``."""
     stub = Stubs(tmp_path / "stubs")
     stub.install("sacct", SACCT_STUB)
+    stub.sacct_fields(FIELDS + ("Elapsed", "Timelimit", "ReqMem"))
     monkeypatch.setenv("STUB_DIR", str(stub.dir))
     monkeypatch.setenv("PATH", "%s%s%s" % (stub.bin, os.pathsep, os.environ["PATH"]))
     return stub

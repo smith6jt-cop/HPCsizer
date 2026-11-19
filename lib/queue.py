@@ -20,7 +20,7 @@ from lib.history import History
 OPEN_QUERY_STATES = "PENDING,RUNNING,SUSPENDED,REQUEUED,RESIZING"
 
 
-def open_jobs_cmd(cfg: Config) -> List[str]:
+def open_jobs_cmd(cfg: Config, fields: Sequence[str] = slurm.FIELDS) -> List[str]:
     """sacct call for the jobs of the configured accounts that are not finished."""
     if not cfg.accounts:
         raise ValueError("no Slurm account configured")
@@ -35,18 +35,19 @@ def open_jobs_cmd(cfg: Config) -> List[str]:
         "-p",
         "--delimiter=" + slurm.SEP,
         "-o",
-        ",".join(slurm.FIELDS),
+        ",".join(fields),
     ]
 
 
 def fetch_open(cfg: Config) -> List[Dict[str, Any]]:
     """Unfinished jobs as classified records. Raises ``collect.HarvestError`` if sacct fails."""
+    fields, _lacking = collect.sacct_fields(cfg)
     try:
-        text = collect.run_sacct(open_jobs_cmd(cfg))
+        text = collect.run_sacct(open_jobs_cmd(cfg, fields))
     except FileNotFoundError:
         raise collect.HarvestError("'%s' not found; is Slurm on PATH?" % cfg.sacct) from None
     try:
-        rows = slurm.records_to_dicts(slurm.split_records(text))
+        rows = slurm.records_to_dicts(slurm.split_records(text, nfields=len(fields)), fields)
     except slurm.SacctFormatError as exc:
         raise collect.HarvestError(str(exc)) from exc
     groups, _orphans = slurm.group_records(rows)

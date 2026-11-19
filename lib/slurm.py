@@ -10,7 +10,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 PARSER_VERSION = 1
 
@@ -57,6 +57,10 @@ FIELDS: Tuple[str, ...] = (
     "WorkDir",
     "SubmitLine",
 )
+
+# Without these a record cannot be identified or placed in time. Every other
+# field is asked for only when the installed sacct has it.
+REQUIRED_FIELDS = frozenset({"JobIDRaw", "JobID", "User", "State", "Submit", "Start", "End"})
 
 # A job in one of these states is not finished; it is skipped now and picked up
 # by a later harvest once it ends (sacct returns any job whose end time falls at
@@ -122,6 +126,32 @@ def build_sacct_cmd(
         cmd += ["-E", utc_stamp(end_ts)]
     cmd += ["-n", "-p", "--delimiter=" + SEP, "-o", ",".join(fields)]
     return cmd
+
+
+def parse_field_list(text: str) -> FrozenSet[str]:
+    """The field names ``sacct --helpformat`` prints, lower-cased (sacct ignores their case)."""
+    return frozenset(token.lower() for token in text.split())
+
+
+def supported_fields(
+    available: Optional[Iterable[str]], wanted: Sequence[str] = FIELDS
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """``(fields to ask for, fields this sacct does not have)``.
+
+    Accounting fields have been added to Slurm over the years, and sacct
+    refuses a whole query that names one it does not know. A field the
+    installed version lacks is therefore left out, and its values are stored
+    as unknown. When ``available`` is None, or is not a believable field list
+    (a required field is not in it), everything is asked for.
+    """
+    wanted = tuple(wanted)
+    if available is None:
+        return wanted, ()
+    have = frozenset(name.lower() for name in available)
+    if not all(name.lower() in have for name in REQUIRED_FIELDS):
+        return wanted, ()
+    kept = tuple(name for name in wanted if name.lower() in have)
+    return kept, tuple(name for name in wanted if name.lower() not in have)
 
 
 def sacct_env(base: Optional[Mapping[str, str]] = None) -> Dict[str, str]:

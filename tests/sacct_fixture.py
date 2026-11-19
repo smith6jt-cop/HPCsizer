@@ -180,6 +180,7 @@ def simple_job(jid: int, **kwargs: Any) -> List[Dict[str, str]]:
     ]
 
 
-def stream(rows: Iterable[Dict[str, str]]) -> str:
-    """Render rows as ``sacct -n -p --delimiter=SEP`` prints them."""
-    return "".join(SEP.join(row[name] for name in FIELDS) + SEP + "\n" for row in rows)
+def stream(rows: Iterable[Dict[str, str]], fields: Iterable[str] = FIELDS) -> str:
+    """Render rows as ``sacct -n -p --delimiter=SEP -o <fields>`` prints them."""
+    fields = tuple(fields)
+    return "".join(SEP.join(row[name] for name in fields) + SEP + "\n" for row in rows)

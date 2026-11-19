@@ -73,12 +73,35 @@ def _run_sacct_once(cmd: Sequence[str]) -> str:
 run_sacct = _run_sacct_once
 
 
+def sacct_fields(cfg: Config) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """``(fields to ask this sacct for, fields of slurm.FIELDS it does not have)``.
+
+    Asks ``sacct --helpformat``, which answers from the program itself without
+    contacting the accounting database. If that fails, everything is asked for.
+    """
+    try:
+        proc = subprocess.run(
+            [cfg.sacct, "--helpformat"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return slurm.supported_fields(None)
+    if proc.returncode != 0:
+        return slurm.supported_fields(None)
+    return slurm.supported_fields(slurm.parse_field_list(proc.stdout))
+
+
 def fetch_window(
     cfg: Config,
     start_ts: int,
     end_ts: Optional[int],
     log: Logger = _stderr,
     sleep: Callable[[float], None] = time.sleep,
+    fields: Sequence[str] = slurm.FIELDS,
 ) -> Tuple[List[Tuple[Dict[str, str], List[Dict[str, str]]]], int]:
     """Query one window and return ``(job groups, orphan step count)``.
 
@@ -86,14 +109,14 @@ def fetch_window(
     is as much a transient failure as a non-zero exit, and storing it would
     silently drop the jobs that were cut off.
     """
-    cmd = slurm.build_sacct_cmd(cfg.accounts, start_ts, end_ts, sacct=cfg.sacct)
+    cmd = slurm.build_sacct_cmd(cfg.accounts, start_ts, end_ts, sacct=cfg.sacct, fields=fields)
     delay = cfg.retry_delay
     attempts = max(1, int(cfg.retries))
     error = "unknown error"
     for attempt in range(1, attempts + 1):
         try:
             text = _run_sacct_once(cmd)
-            rows = slurm.records_to_dicts(slurm.split_records(text))
+            rows = slurm.records_to_dicts(slurm.split_records(text, nfields=len(fields)), fields)
             return slurm.group_records(rows)
         except FileNotFoundError:
             raise HarvestError("'%s' not found; is Slurm on PATH?" % cfg.sacct) from None
@@ -218,8 +241,14 @@ def harvest(
         users = set()
         late_before = (watermark - overlap) if watermark is not None else None
 
+        fields, lacking = sacct_fields(cfg)
+        if lacking:
+            log("[harvest] this sacct has no field %s; stored as unknown" % ", ".join(lacking))
+
         for slice_start, slice_end in _slices(start, now, cfg.slice_days * DAY):
-            groups, orphans = fetch_window(cfg, slice_start, slice_end, log=log, sleep=sleep)
+            groups, orphans = fetch_window(
+                cfg, slice_start, slice_end, log=log, sleep=sleep, fields=fields
+            )
             stats["n_unparsed"] += orphans
             for job_row, step_rows in groups:
                 ident = (job_row.get("JobIDRaw", ""), job_row.get("Submit", ""))

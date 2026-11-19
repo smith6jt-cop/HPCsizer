@@ -27,6 +27,11 @@ lines, so job names and submit lines may contain `|` and newlines. Output that
 does not end on a record boundary is rejected as truncated and the query is
 retried.
 
+`<fields>` are the fields listed below that the installed `sacct` has: it is
+asked once per harvest (`sacct --helpformat`), because it refuses a whole query
+that names a field its version does not know. A field it lacks is stored as
+unknown; the harvest log and `hpg preflight` name it.
+
 `sacct` prints a job as one line for the job followed by one line per step
 (`.batch`, `.extern`, `.0`, `.interactive`, ...). They are combined as follows.
 
@@ -235,9 +240,22 @@ ignored when the file is read.
 | File | Written by | Read by |
 |---|---|---|
 | `profiles.db` | a harvest (the owner), by building a copy and renaming it into place | everyone, read-only |
-| `spool/<jobid>.<node>.tsv` | the sampler, inside the job, as the job's user | the next harvest |
+| `spool/<jobid>.<node>.tsv` | the sampler, inside the job, as the job's user (`<jobid>.<node>-<pid>-<n>.tsv` when that name is taken by something it must not write to) | the next harvest |
 | `spool/submit/<jobid>.json` | `hpg submit`, after `sbatch` returns the job id | the next harvest |
 | `timeseries/<jobid>-<submit_ts>.<node>.tsv.gz` | the harvest that ingested the series | `hpg plot` |
+
+## Text that comes from jobs
+
+A job's name, command line and working directory are written by whoever
+submits it, and a process names itself. The database stores them as Slurm
+reported them. Reports clean them once, before a family name is derived:
+control characters (escape sequences, newlines, tabs) and the invisible
+characters that reorder or hide text are replaced by their escape notation
+(`\x1b`, `\x0a`, `\u202e`), so that a name cannot change a terminal, break a
+table, or add a line to the commands `hpg queue` prints. This also holds for
+the JSON forms. In CSV output every row is one physical line, and a text cell
+that a spreadsheet would evaluate as a formula (it begins with `=`, `+`, `-` or
+`@`) is given a leading apostrophe.
 
 ## Versions
 

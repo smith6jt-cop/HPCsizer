@@ -65,6 +65,75 @@ class TestSignature:
         assert collapse_digits("v3-dg") == collapse_digits("v14-dg") == "v#-dg"
 
 
+class TestProgramsThatAreNotAFileName:
+    """Different programs of one user must not share a family: one would be sized from the other."""
+
+    def wrap(self, command):
+        return submit_signature("sbatch --wrap " + command)
+
+    @pytest.mark.parametrize(
+        "one, other",
+        [
+            ("python -c import a; a.run(1)", "python -c import b; b.train()"),
+            ("python -c import numpy as np; small()", "python -c import numpy as np; huge()"),
+            ("Rscript -e rmarkdown::render('a.Rmd')", "Rscript -e source('fit.R')"),
+            ("matlab -nodisplay -batch run_a", "matlab -nodisplay -batch run_b"),
+            ("matlab -r segment_all; exit", "matlab -r stitch; exit"),
+            ("perl -e print 1", "perl -e print 2 if 0"),
+            ("julia -e using A; A.go()", "julia -e using B; B.go()"),
+            (
+                "for f in *.tif; do python seg.py $f; done",
+                "for f in *.csv; do Rscript fit.R $f; done",
+            ),
+            (
+                "while read s; do ./align $s; done < samples.txt",
+                "while read s; do ./sort $s; done < s.txt",
+            ),
+            ("if [ -f x ]; then ./a; fi", "if [ -f y ]; then ./b; fi"),
+        ],
+    )
+    def test_inline_code_and_shell_constructs_are_told_apart(self, one, other):
+        a, b = self.wrap(one), self.wrap(other)
+        assert a and b and a != b
+        assert self.wrap(one) == a, "the same command is the same program"
+
+    def test_the_same_one_liner_with_another_number_is_one_family(self, conf):
+        a = classify(job(job_name="wrap", submit_line="sbatch --wrap python -c run(12, 3)"), conf)
+        b = classify(
+            job(job_name="wrap", submit_line="sbatch --mem=8G --wrap python -c run(13, 4)"), conf
+        )
+        c = classify(job(job_name="wrap", submit_line="sbatch --wrap python -c other(12)"), conf)
+        assert a["family"] == b["family"] != c["family"]
+        assert a["family"].startswith("smith6jt/wrap/cmd:python:-c:")
+
+    @pytest.mark.parametrize(
+        "command, expected",
+        [
+            ("R CMD BATCH --no-save fit.R out.txt", "Rscript:fit.R"),
+            ("R --no-save < fit.R", "Rscript:fit.R"),
+            ("python -W ignore a.py", "python:a.py"),
+            ("python -X dev -u b.py --n 3", "python:b.py"),
+            ("java -cp lib.jar Main in.txt", "java:Main"),
+            ("julia -t 4 sim.jl", "julia:sim.jl"),
+            ("mpirun -np 4 ./solver in.dat", "solver"),
+            ("mpiexec --mca btl self -n 2 ./a.out", "a.out"),
+            ("mpirun -n 8 python sim.py", "python:sim.py"),
+            ("(python a.py)", "python:a.py"),
+            ("( cd /x && python a.py )", "python:a.py"),
+            ("{ module load R; Rscript fit.R; }", "Rscript:fit.R"),
+            ("python tool --input data.py", "python:tool"),
+        ],
+    )
+    def test_the_program_is_not_an_option_value_or_a_launcher(self, command, expected):
+        assert self.wrap(command) == expected
+
+    def test_wrap_as_an_argument_of_a_script_is_not_a_wrap_job(self, conf):
+        c = classify(job(job_name="run.sh", submit_line="sbatch -c 2 run.sh --wrap tight"), conf)
+        assert c["kind"] == "batch" and c["signature"] == "run.sh"
+        w = classify(job(job_name="wrap", submit_line="sbatch -c 2 --wrap run.sh --wrap"), conf)
+        assert w["kind"] == "wrap"
+
+
 class TestKind:
     def test_open_ondemand(self, conf):
         assert job_kind(job(job_name="ondemand/sys/dashboard/sys/rstudio"), conf) == "ood:rstudio"

@@ -62,6 +62,14 @@ A name that says nothing about the job — `wrap` (what Slurm calls every
 the job is identified by its program instead: two `--wrap` jobs running
 different programs are different families, and arguments never matter.
 
+The program is the script an interpreter runs (`python:seg.py`,
+`Rscript:fit.R`) or the executable itself; launchers such as `srun`, `mpirun`
+and `conda run` are looked through. Where the command line carries the code
+itself — `python -c "..."`, `Rscript -e "..."`, `matlab -batch "..."`, a `for`
+loop — that text is the program: the same text, apart from the numbers in it,
+is one family, shown with a short code such as `python:-c:cpkmnidm`, and a
+different text is a different family.
+
 Other people's batch jobs are never used: a job called `align` is different
 work for different people.
 

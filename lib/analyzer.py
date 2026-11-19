@@ -61,6 +61,9 @@ class Request:
     qos: Optional[str] = None
     account: Optional[str] = None
     het: bool = False
+    # False for a request rebuilt from accounting when neither a step nor the
+    # command line says whether its CPUs are tasks or threads of one task.
+    layout_known: bool = True
     problems: List[str] = field(default_factory=list)
 
     @property

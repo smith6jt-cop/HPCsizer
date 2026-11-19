@@ -117,16 +117,21 @@ no memory figure is given.
 
 `--mem` is always treated as the total of the job. If you write
 `--mem-per-cpu`, the suggestion is given in that form, recomputed for the
-suggested CPU count.
+suggested CPU count and rounded up in steps of 128 MB (64 MB below 512 MB); a
+share that is kept is written exactly as you wrote it.
 
 ### CPUs
 
 - Only ever **lowered**: to the highest number of cores a run kept busy on
-  average, times 1.25, rounded up.
+  average, times 1.25, rounded up. Only runs that ended normally, or ran until
+  their time limit, count: a run that crashed or was cancelled may never have
+  got past its start-up.
 - Not lowered when that run used (nearly) all the cores it had — four busy
   cores out of four say the job can use at least four, not that sixteen would
   be too many.
-- Not changed for jobs with more than one task or node.
+- Not changed for jobs with more than one task or node, nor for a job that has
+  not run yet when neither its command line nor an earlier run of its family
+  with the same CPU total says how its CPUs are divided into tasks.
 - When the CPU count is lowered, memory is always stated as a total, so that a
   per-CPU request or a per-CPU cluster default does not shrink with it.
 
@@ -145,8 +150,14 @@ which record how many cores were busy for 95% of the samples.
 - Not above the longest limit under which runs completed, when none timed out.
 - **Not shortened in the same suggestion that lowers the CPU count** — fewer
   cores can make the run longer. The report says what history alone would
-  suggest; apply it once the job has run with its new CPU count.
-- For sessions, ending at the limit is normal. Their limit is never raised.
+  suggest; apply it once the job has run with its new CPU count. For the same
+  reason it is not shortened while the request asks for fewer cores than every
+  run it would be judged from.
+- For sessions, ending at the limit is normal. Their limit is never raised,
+  and never lowered to a limit that cut earlier sessions off: such a limit is
+  not known to be enough.
+- A raise is not checked against what the partition allows; if the suggested
+  limit is above the partition's, use the partition's.
 
 ### GPUs
 
@@ -164,10 +175,16 @@ Your `#SBATCH` lines stay as they are; the command line overrides them. Nothing
 is applied when
 
 - the figures do not come from the job's own history (see "No history" below),
+  or come from other members' sessions,
 - the job has more than one task or node, or is a heterogeneous job,
 - the request is `--mem=0` (the whole node),
 - an sbatch option is used that `hpg` does not know — the job is then
   submitted exactly as given.
+
+A value your submission does not state at all is shown as the last run's,
+marked `(last run)`. sbatch does not know the last run: left alone, the job
+would get the cluster's default. With `--apply` such a value is therefore
+passed on even where the table says `keep`.
 
 `hpg submit` without `--apply` only reports. It never prompts unless you asked
 for `--apply` at a terminal.
@@ -196,6 +213,10 @@ Pending jobs that ask for less than their family needed:
 
 The `scontrol update` lines are printed for you to review and run; `hpg` does
 not run them.
+
+The list comes from Slurm's accounting, which reports a pending job once it is
+eligible to run: jobs that are held, deferred with `--begin` or waiting on a
+dependency do not appear until then.
 
 ## Profiles: what the job really did
 

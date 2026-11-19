@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from lib import classify, metrics, sbatch_opts
-from lib.analyzer import Request, Submission
+from lib.analyzer import Request, Submission, options_dict, request_from_options
 from lib.config import Config
 from lib.fmt import fmt_date, fmt_gb, fmt_mem_mb, fmt_minutes, fmt_num, fmt_pct, table
 from lib.history import DAY, POOLED_LEVELS, History, describe_level, level_keys
@@ -133,13 +133,15 @@ def round_mem_mb(mb: float, per_unit: bool = False) -> int:
     """Round a memory figure up to a value people type.
 
     Whole GB from 2 GB, 256 MB steps below. A job total is never below
-    ``MIN_MEM_MB``; a per-CPU or per-GPU share (``per_unit``) may be, in 64 MB
-    steps.
+    ``MIN_MEM_MB``. A per-CPU or per-GPU share (``per_unit``) is multiplied by
+    the number of CPUs again, so it is rounded finely -- 64 MB steps below
+    512 MB, 128 MB steps above -- or sixteen shares of 2.1 GB would become
+    sixteen of 3 GB.
     """
     mb = float(mb)
     if per_unit:
         mb = max(mb, 64.0)
-        step = 64 if mb < 512 else (256 if mb < 2048 else 1024)
+        step = 64 if mb < 512 else 128
     else:
         mb = max(mb, float(MIN_MEM_MB))
         step = 256 if mb < 2048 else 1024
@@ -251,17 +253,34 @@ def target_from_kind(
     return Target(cls=cls, request=request, label="%s session" % kind)
 
 
+def _stated_layout(submit_line: Optional[str]) -> Request:
+    """Tasks, CPUs per task and nodes as far as a stored command line states them."""
+    if not submit_line:
+        return Request()
+    tokens = sbatch_opts.strip_sbatch_word(submit_line.split())
+    try:
+        return request_from_options(options_dict(sbatch_opts.parse_argv(tokens)))
+    except (ValueError, TypeError):
+        return Request()
+
+
 def request_of_job(job: Mapping[str, Any]) -> Request:
     """The request of a stored job, in the shape of a parsed sbatch request."""
     req = Request(job_name=job.get("job_name"))
     cpus = job.get("req_cpus") or job.get("alloc_cpus")
-    tasks = job.get("n_tasks") or 1
-    nodes = job.get("alloc_nodes") or job.get("req_nodes") or 1
+    # Accounting gives a job its CPU total. How that divides into tasks is on
+    # its steps once it has run, or on its command line if it was stated there
+    # (not if it was stated in the script).
+    stated = _stated_layout(job.get("submit_line"))
+    tasks = stated.ntasks or job.get("n_tasks") or 1
+    nodes = job.get("alloc_nodes") or job.get("req_nodes") or stated.nodes or 1
     if cpus:
         if tasks > 1 and cpus % tasks == 0:
             req.ntasks, req.cpus_per_task = int(tasks), int(cpus // tasks)
         else:
             req.cpus_per_task = int(cpus)
+        if cpus > 1 and job.get("n_steps") == 0 and not (stated.ntasks or stated.cpus_per_task):
+            req.layout_known = False  # it has not run: no step tells, and nor does the command line
     if nodes > 1:
         req.nodes = int(nodes)
     if job.get("req_mem_mb"):
@@ -463,7 +482,12 @@ def _memory(res: Dict[str, Any], runs: Sequence[Dict], cfg: Config, session: boo
 
 
 def _cpus(
-    res: Dict[str, Any], runs: Sequence[Dict], cfg: Config, session: bool, multi: bool
+    res: Dict[str, Any],
+    runs: Sequence[Dict],
+    cfg: Config,
+    session: bool,
+    multi: bool,
+    layout_known: bool = True,
 ) -> None:
     averages = [r["m"]["cores_used"] for r in runs if r["m"]["cores_used"] is not None]
     res["used"] = metrics.describe(averages)
@@ -471,8 +495,13 @@ def _cpus(
     peaks = [r["m"]["cores_peak"] for r in runs if r["m"].get("cores_peak") is not None]
     res["peak"] = max(peaks) if peaks else None
 
+    # A run that crashed or was cancelled says nothing about how many cores the
+    # job keeps busy: it may never have got past its start-up. One that ran
+    # into its time limit was working until then.
     basis: List[Tuple[float, Dict[str, Any], str]] = []
     for run in runs:
+        if not (_normal_end(run, session) or run.get("state") == "TIMEOUT"):
+            continue
         m = run["m"]
         if m.get("cores_p95") is not None:
             # The sustained count leaves out what was used before the first
@@ -490,6 +519,14 @@ def _cpus(
         res["kept_because"] = "multi"
         res["notes"].append("more than one task or node: the CPU count is not adjusted")
         return
+    if not layout_known:
+        res.update(suggested=requested, action="keep" if requested else None, change=0.0)
+        res["kept_because"] = "layout"
+        res["notes"].append(
+            "this job has not run yet and its command line does not say how its CPUs are "
+            "divided into tasks: the CPU count is not judged"
+        )
+        return
     if len(basis) < cfg.min_runs:
         res["kept_because"] = "unprofiled-session" if session else "unmeasured"
         if session:
@@ -500,7 +537,8 @@ def _cpus(
             )
         else:
             res["notes"].append(
-                "CPU time was measured in %d run(s); %d are needed" % (len(basis), cfg.min_runs)
+                "CPU time was measured in %d run(s) that ended normally; %d are needed"
+                % (len(basis), cfg.min_runs)
             )
         if requested:
             res.update(suggested=requested, action="keep", change=0.0)
@@ -539,6 +577,7 @@ def _time(
     session: bool,
     cpus_lowered: bool,
     unlimited: bool,
+    fewer_cores: Optional[Tuple[int, int]] = None,
 ) -> None:
     done = [r for r in runs if _normal_end(r, session) and (r.get("elapsed_sec") or 0) > 0]
     elapsed = [r["elapsed_sec"] / 60.0 for r in done]
@@ -606,10 +645,33 @@ def _time(
             "(history alone suggests %s)" % fmt_minutes(suggested)
         )
         return
+    if requested is not None and suggested < requested and fewer_cores:
+        res.update(suggested=requested, action="keep", change=0.0)
+        res["basis"] = None
+        res["notes"].append(
+            "not shortened: these runs had more cores (%d or more) than this request (%d), and "
+            "fewer cores can lengthen the run (history alone suggests %s)"
+            % (fewer_cores[1], fewer_cores[0], fmt_minutes(suggested))
+        )
+        return
     if session and requested is not None and minutes > requested:
         res.update(suggested=requested, action="keep", change=0.0)
         res["basis"] = None
         return
+    if session and requested is not None and suggested < requested:
+        # A session that ran until its limit was cut off, not finished: that
+        # limit is not known to be enough, so it is not suggested as one.
+        cut = [
+            r["req_time_min"] for r in done if r.get("state") == "TIMEOUT" and r.get("req_time_min")
+        ]
+        if cut and suggested <= max(cut):
+            res.update(suggested=requested, action="keep", change=0.0)
+            res["basis"] = None
+            res["notes"].append(
+                "%d of these sessions ran until their limit (up to %s): a shorter limit than "
+                "the one asked for is not suggested" % (len(cut), fmt_minutes(max(cut)))
+            )
+            return
     _settle(res, minutes, suggested)
     if unlimited and res["action"] == "set":
         res["notes"].append("a finite limit lets the scheduler fit the job into gaps")
@@ -789,6 +851,26 @@ def _target_dict(target: Target) -> Dict[str, Any]:
     }
 
 
+def _share(total: float, units: int, asked: Optional[float], mem: Dict[str, Any]) -> int:
+    """A per-CPU or per-GPU share of ``total`` MB, never above the share that was asked for."""
+    if asked and mem["action"] == "keep":
+        return int(math.ceil(asked))
+    share = round_mem_mb(float(total) / units, per_unit=True)
+    return int(min(share, math.ceil(asked))) if asked else share
+
+
+def _unstated(target: Target, res: Dict[str, Any]) -> bool:
+    """Is this a value that the submission itself does not state?
+
+    The table then compares with what the last run asked for. sbatch will not:
+    it falls back to the cluster's default, which may be far less. So when a
+    suggestion is applied, such a value is passed on even where it is "kept".
+    """
+    return bool(
+        target.explicit and res.get("requested_from") == "last run" and res.get("suggested")
+    )
+
+
 def _options(target: Target, rec: Dict[str, Any]) -> Tuple[List[str], Dict[str, str], List[str]]:
     """``(options, changes, blockers)`` for a recommendation.
 
@@ -805,6 +887,8 @@ def _options(target: Target, rec: Dict[str, Any]) -> Tuple[List[str], Dict[str, 
 
     if rec["source"] != SOURCE_HISTORY:
         blockers.append("the figures do not come from this job's own history")
+    elif rec.get("level") in POOLED_LEVELS:
+        blockers.append("the figures come from other members' sessions, not from your own")
     if req.het:
         blockers.append("heterogeneous job")
     elif req.multi:
@@ -831,22 +915,25 @@ def _options(target: Target, rec: Dict[str, Any]) -> Tuple[List[str], Dict[str, 
                 "the memory request is unknown, and with fewer CPUs a per-CPU default would shrink"
             )
     if total is not None and not req.multi and not req.mem_all:
+        # A share that is kept is written as it was asked for; one that is
+        # lowered must not come out above what was asked for through rounding.
+        asked = req.mem_value_mb if mem["action"] in ("keep", "lower") and not pin else None
         if req.mem_form == "mem-per-cpu" and cpus_after:
-            share = round_mem_mb(float(total) / cpus_after, per_unit=True)
+            share = _share(total, cpus_after, asked if cpus_after == req.cpus else None, mem)
             option = "--mem-per-cpu=%s" % sbatch_opts.format_mem(share)
         elif req.mem_form == "mem-per-gpu" and req.gpus:
-            share = round_mem_mb(float(total) / req.gpus, per_unit=True)
+            share = _share(total, req.gpus, asked, mem)
             option = "--mem-per-gpu=%s" % sbatch_opts.format_mem(share)
         else:
             option = "--mem=%s" % sbatch_opts.format_mem(total)
         options.append(option)
-        if mem["action"] in ("lower", "raise", "set") or pin:
+        if mem["action"] in ("lower", "raise", "set") or pin or _unstated(target, mem):
             changes["mem"] = option
 
     if time_["suggested"] is not None:
         option = "--time=%s" % sbatch_opts.format_time(time_["suggested"])
         options.append(option)
-        if time_["action"] in ("lower", "raise", "set"):
+        if time_["action"] in ("lower", "raise", "set") or _unstated(target, time_):
             changes["time"] = option
     order = ("--mem", "--cpus-per-task", "--time")
     options.sort(key=lambda opt: [opt.startswith(prefix) for prefix in order].index(True))
@@ -894,7 +981,21 @@ def recommend(
             "last_jobs": [_jid(r) for r in runs[-5:]],
         }
         _memory(rec["mem"], runs, cfg, session)
-        _cpus(rec["cpus"], runs, cfg, session, target.request.multi)
+        # A job that has not run borrows the task layout of the most recent
+        # run of its family when both ask for the same number of CPUs.
+        multi, layout_known = target.request.multi, target.request.layout_known
+        if not layout_known:
+            last = request_of_job(runs[-1])
+            if last.layout_known and last.cpus == target.request.cpus:
+                multi, layout_known = multi or last.multi, True
+        _cpus(rec["cpus"], runs, cfg, session, multi, layout_known=layout_known)
+        # A request that already has fewer cores than every run in evidence:
+        # how long those runs took says little about how long this one will.
+        fewer = None
+        allocated = [r["m"]["cores_alloc"] for r in runs if r["m"].get("cores_alloc")]
+        asked = rec["cpus"]["requested"]
+        if not session and asked and allocated and asked < min(allocated):
+            fewer = (int(asked), int(min(allocated)))
         _time(
             rec["time"],
             runs,
@@ -902,6 +1003,7 @@ def recommend(
             session,
             cpus_lowered=rec["cpus"]["action"] == "lower",
             unlimited=target.request.time_unlimited,
+            fewer_cores=fewer,
         )
         _gpus(rec["gpus"], runs, cfg)
         rec["confidence"] = _confidence(level, len(runs), rec["mem"]["used"])

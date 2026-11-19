@@ -170,9 +170,9 @@ class TestParseTs:
 
 class TestBuildCommand:
     def test_all_users_of_the_accounts(self):
-        cmd = build_sacct_cmd(["maigan", "clive"], 1794000000)
+        cmd = build_sacct_cmd(["maigan", "otherlab"], 1794000000)
         assert "-a" in cmd, "without -a sacct returns only the caller's jobs"
-        assert cmd[cmd.index("-A") + 1] == "maigan,clive"
+        assert cmd[cmd.index("-A") + 1] == "maigan,otherlab"
         assert cmd[cmd.index("-S") + 1] == "2026-11-06T21:20:00"
         assert "-p" in cmd and "-n" in cmd and "-X" not in cmd
         assert "--delimiter=" + SEP in cmd

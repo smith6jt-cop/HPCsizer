@@ -5,18 +5,43 @@ member: no conda environment and no install step.
 """
 
 import argparse
+import dataclasses
+import getpass
 import json
 import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from lib import __version__, collect, db, health, schedule
+from lib import (
+    __version__,
+    analyzer,
+    backtest,
+    collect,
+    db,
+    health,
+    history,
+    recommender,
+    sbatch_opts,
+    schedule,
+)
 from lib.config import Config, load_config
+from lib.fmt import fmt_age, fmt_bytes, fmt_int, fmt_ts
 
 # Commands still served by the version 2 implementation until they are replaced.
-LEGACY_COMMANDS = ("submit", "recommend", "interactive", "report", "history", "plot", "flags")
+LEGACY_COMMANDS = ("submit", "interactive", "report", "history", "plot", "flags")
+
+# Commands whose trailing arguments are sbatch's, passed through untouched:
+# hpg's own options come first, and everything from the first other word on is
+# read exactly as sbatch would read it.
+PASS_THROUGH: Dict[str, Tuple[frozenset, frozenset]] = {
+    # command: (options without a value, options with a value)
+    "recommend": (
+        frozenset({"--json", "--no-refresh", "-h", "--help"}),
+        frozenset({"--user", "--days", "--name", "--like", "--kind"}),
+    ),
+}
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -24,46 +49,41 @@ EXIT_USAGE = 2
 EXIT_NO_DATA = 3
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-
-
-def fmt_ts(ts: Optional[float]) -> str:
-    if not ts:
-        return "never"
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-
-
-def fmt_age(seconds: Optional[float]) -> str:
-    if seconds is None:
-        return "unknown"
-    if seconds < 90:
-        return "%d s" % seconds
-    if seconds < 5400:
-        return "%.0f min" % (seconds / 60.0)
-    if seconds < 2 * 86400:
-        return "%.1f h" % (seconds / 3600.0)
-    return "%.1f d" % (seconds / 86400.0)
-
-
-def fmt_int(value: Optional[float]) -> str:
-    return "-" if value is None else "{:,}".format(int(value))
-
-
-def fmt_bytes(value: Optional[float]) -> str:
-    if value is None:
-        return "-"
-    size = float(value)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return ("%.0f %s" if unit == "B" else "%.1f %s") % (size, unit)
-        size /= 1024.0
-    return "%d B" % value
-
-
 def _err(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def current_user() -> str:
+    return os.environ.get("USER") or getpass.getuser()
+
+
+def split_passthrough(command: str, tokens: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """Split ``tokens`` into hpg's leading options and the sbatch arguments after them."""
+    flags, valued = PASS_THROUGH[command]
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--":
+            return list(tokens[:i]), list(tokens[i + 1 :])
+        name, eq, _value = token.partition("=")
+        if name in flags and not eq:
+            i += 1
+        elif name in valued:
+            i += 1 if eq else 2
+        else:
+            break
+    return list(tokens[:i]), list(tokens[i:])
+
+
+def data_line(watermark_ts: Optional[int], now: int, refresh: str = "") -> str:
+    """The line every report ends with: how old its data is."""
+    if not watermark_ts:
+        return "Data: no harvest has been recorded yet"
+    note = {
+        "failed": "; a refresh from sacct failed",
+        "busy": "; a harvest is running, this is the snapshot before it",
+    }.get(refresh, "")
+    return "Data as of %s (%s old)%s" % (fmt_ts(watermark_ts), fmt_age(now - watermark_ts), note)
 
 
 def _ingest_hook():
@@ -354,6 +374,109 @@ def cmd_schedule(args: argparse.Namespace, cfg: Config) -> int:
 
 
 # ---------------------------------------------------------------------------
+# recommend / backtest
+# ---------------------------------------------------------------------------
+
+RECOMMEND_EPILOG = """\
+examples:
+  hpg recommend job.sh                       a script, read like sbatch reads it
+  hpg recommend --mem=64G -c 16 job.sh       with options given on the command line
+  hpg recommend --wrap "python segment.py /blue/grp/s1.tif"
+  hpg recommend --name mplx12k-spleen        jobs with that name, no script needed
+  hpg recommend --like 51598968              a job like a stored one
+  hpg recommend --kind ood:rstudio           interactive sessions of one kind
+
+exit status: 0 with a suggestion, 3 when there is no data to base one on.
+"""
+
+
+def cmd_recommend(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    if args.days:
+        cfg = dataclasses.replace(cfg, lookback_days=args.days)
+    selectors = [name for name in ("name", "like", "kind") if getattr(args, name)]
+    parsed = sbatch_opts.parse_argv(args.sbatch_args)
+    has_job = parsed.script is not None or parsed.wrap is not None
+    if len(selectors) > 1 or (selectors and has_job):
+        _err("hpg recommend: give a script, --wrap, --name, --like or --kind -- one of them")
+        return EXIT_USAGE
+    if not selectors and not has_job:
+        _err("hpg recommend: nothing to size; give a script, --wrap CMD, --name, --like or --kind")
+        return EXIT_USAGE
+
+    user = args.user or current_user()
+    submission = None
+    if has_job:
+        try:
+            submission = analyzer.analyze_submission(args.sbatch_args, roots=cfg.data_roots)
+        except OSError as exc:
+            _err("hpg recommend: %s" % exc)
+            return EXIT_USAGE
+    request = analyzer.request_from_options(analyzer.options_dict(parsed))
+
+    refresh = collect.maybe_refresh(
+        cfg, enabled=not args.no_refresh, now=now, ingest=_ingest_hook()
+    )
+    jobs, info = history.load(cfg, since_ts=now - int(cfg.lookback_days * history.DAY))
+    try:
+        if args.like:
+            with db.reader(cfg.db_path) as conn:
+                found = db.find_jobs(conn, args.like)
+            if not found:
+                _err("hpg recommend: no stored job %s" % args.like)
+                return EXIT_NO_DATA
+            job = history.annotate(found[:1], cfg)[0]
+            target = recommender.target_from_job(job, cfg, request if parsed.options else None)
+        elif args.kind:
+            target = recommender.target_from_kind(args.kind, user, cfg, request)
+        elif args.name:
+            target = recommender.target_from_name(args.name, user, cfg, request)
+        else:
+            target = recommender.target_from_submission(submission, user, cfg)
+    except ValueError as exc:
+        _err("hpg recommend: %s" % exc)
+        return EXIT_USAGE
+
+    rec = recommender.recommend(target, history.History(jobs), cfg, now)
+    rec["data"] = {"as_of_ts": info["watermark_ts"], "refresh": refresh, "db": cfg.db_path}
+    if args.json:
+        print(json.dumps(rec, indent=2, sort_keys=True, default=str))
+    else:
+        print(recommender.render_text(rec))
+        print(data_line(info["watermark_ts"], now, refresh))
+    return EXIT_OK if rec["source"] != recommender.SOURCE_NONE else EXIT_NO_DATA
+
+
+def cmd_backtest(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    try:
+        custom = backtest.parse_settings(args.set, cfg) if args.set else None
+    except ValueError as exc:
+        _err("hpg backtest: %s" % exc)
+        return EXIT_USAGE
+    refresh = collect.maybe_refresh(
+        cfg, enabled=not args.no_refresh, now=now, ingest=_ingest_hook()
+    )
+    jobs, info = history.load(cfg)
+    result = backtest.backtest(
+        jobs,
+        cfg,
+        since_ts=now - args.days * history.DAY if args.days else None,
+        user=args.user,
+        kind=args.kind,
+        custom=custom,
+        custom_label=", ".join(args.set or []),
+    )
+    result["data"] = {"as_of_ts": info["watermark_ts"], "refresh": refresh, "db": cfg.db_path}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(backtest.render_text(result))
+        print(data_line(info["watermark_ts"], now, refresh))
+    return EXIT_OK if result["jobs"] else EXIT_NO_DATA
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -410,6 +533,50 @@ def build_parser() -> argparse.ArgumentParser:
     ssub.add_parser("remove", help="remove the scrontab entry and cancel chain jobs")
     p.set_defaults(func=cmd_schedule)
 
+    p = sub.add_parser(
+        "recommend",
+        help="what to request for a job, from what its earlier runs used",
+        usage="hpg recommend [--user U] [--days N] [--json] [--no-refresh]\n"
+        "                     (SBATCH-ARGS | --name NAME | --like JOBID | --kind KIND)",
+        description="Compare a job's request with what comparable finished runs used and "
+        "suggest the next request. hpg's own options come first; everything after them is "
+        "read as sbatch would read it (options, then a script or --wrap).",
+        epilog=RECOMMEND_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--name", help="size jobs with this job name (no script needed)")
+    p.add_argument("--like", metavar="JOBID", help="size a job like this stored one")
+    p.add_argument("--kind", help="size an interactive session kind, e.g. ood:rstudio or vscode")
+    p.add_argument("--user", help="whose history to use (default: you)")
+    p.add_argument("--days", type=int, help="how far back to look (default: policy lookback_days)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
+    p.set_defaults(func=cmd_recommend, sbatch_args=[])
+
+    p = sub.add_parser(
+        "backtest",
+        help="replay stored jobs: what would a sizing policy have done?",
+        description="Size every stored job from the runs that had ended before it was "
+        "submitted, and compare with what it then used.",
+    )
+    p.add_argument(
+        "--days", type=int, help="score jobs submitted in the last N days (default: all)"
+    )
+    p.add_argument("--user", help="score only this user's jobs")
+    p.add_argument(
+        "--kind", help="score only jobs of this kind (batch, wrap, vscode, ood:<app>, ...)"
+    )
+    p.add_argument(
+        "--set",
+        action="append",
+        metavar="KEY=VALUE",
+        help="also score the configured policy with this setting changed (repeatable), "
+        "e.g. --set mem_headroom=1.1 --set last_n=10",
+    )
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
+    p.set_defaults(func=cmd_backtest)
+
     return parser
 
 
@@ -424,8 +591,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return int(exc.code or 0)
         return EXIT_OK
 
+    passed_through: List[str] = []
+    if argv and argv[0] in PASS_THROUGH:
+        own, passed_through = split_passthrough(argv[0], argv[1:])
+        argv = [argv[0]] + own
+
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.sbatch_args = passed_through
     if not getattr(args, "func", None):
         parser.print_help()
         return EXIT_USAGE

@@ -123,6 +123,7 @@ def job_metrics(
             cpu_sec, cpu_source = job["cpu_sec"], job.get("cpu_src") or "rusage"
     cores_used = cpu_sec / elapsed if cpu_sec is not None and elapsed >= 60 else None
     cores_peak = job.get("mon_max_cores")
+    cores_p95 = job.get("mon_p95_cores")
     cpu_eff = cores_used / cores_alloc if cores_used is not None and cores_alloc else None
 
     # -- time ----------------------------------------------------------------
@@ -203,6 +204,7 @@ def job_metrics(
         "cores_alloc": cores_alloc,
         "cores_used": cores_used,
         "cores_peak": cores_peak,
+        "cores_p95": cores_p95,
         "cpu_source": cpu_source,
         "cpu_eff": cpu_eff,
         "time_req_min": time_req_min,

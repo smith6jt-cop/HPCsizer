@@ -1,8 +1,7 @@
-"""Tests for lib/sbatch_opts.py and lib/classify.py."""
+"""Tests for lib/classify.py: kinds, program signatures and job families."""
 
 import pytest
 
-from lib import sbatch_opts
 from lib.classify import (
     classify,
     collapse_digits,
@@ -23,59 +22,6 @@ def job(**kwargs):
     base = {"user": "smith6jt", "job_name": "job", "submit_line": "sbatch job.sh"}
     base.update(kwargs)
     return base
-
-
-class TestSbatchArgv:
-    def test_script_and_its_arguments(self):
-        p = sbatch_opts.parse_argv("--mem=8G -c 4 -t 1:00:00 run.sh --mem=1G input".split())
-        assert p.script == "run.sh" and p.script_index == 5
-        assert p.script_args == ["--mem=1G", "input"], "options after the script belong to it"
-        assert (p.get("mem"), p.get("cpus-per-task"), p.get("time")) == ("8G", "4", "1:00:00")
-        assert not p.uncertain
-
-    def test_separate_and_attached_forms(self):
-        p = sbatch_opts.parse_argv(["--mem", "8G", "-c8", "-J", "x", "--time=30", "s.sh"])
-        assert (p.get("mem"), p.get("cpus-per-task"), p.get("job-name"), p.get("time")) == (
-            "8G",
-            "8",
-            "x",
-            "30",
-        )
-        assert [(o.name, o.start, o.end) for o in p.options][:2] == [
-            ("mem", 0, 2),
-            ("cpus-per-task", 2, 3),
-        ]
-
-    def test_flags_and_bundled_short_options(self):
-        p = sbatch_opts.parse_argv(["-H", "--parsable", "-Qc2", "--exclusive", "s.sh"])
-        assert p.has("hold") and p.has("parsable") and p.has("quiet") and p.has("exclusive")
-        assert p.get("cpus-per-task") == "2" and p.script == "s.sh"
-
-    def test_wrap_has_no_script(self):
-        p = sbatch_opts.parse_argv(["-c", "2", "--wrap", "python a.py"])
-        assert p.wrap == "python a.py" and p.script is None
-
-    def test_last_occurrence_wins(self):
-        assert sbatch_opts.parse_argv(["--mem=1G", "--mem=2G", "s.sh"]).get("mem") == "2G"
-
-    def test_unknown_option_without_a_value_is_uncertain(self):
-        p = sbatch_opts.parse_argv(["--frobnicate", "8", "s.sh"])
-        assert p.uncertain and p.unknown == ["--frobnicate"]
-
-    def test_unknown_option_with_a_value_is_safe(self):
-        p = sbatch_opts.parse_argv(["--frobnicate=8", "s.sh"])
-        assert not p.uncertain and p.script == "s.sh"
-
-    def test_double_dash_ends_options(self):
-        p = sbatch_opts.parse_argv(["-c", "2", "--", "-odd-name.sh", "x"])
-        assert p.script == "-odd-name.sh" and p.script_args == ["x"]
-
-    def test_stdin_script(self):
-        assert sbatch_opts.parse_argv(["--mem=1G"]).script is None
-
-    def test_strip_sbatch_word(self):
-        assert sbatch_opts.strip_sbatch_word(["/opt/slurm/bin/sbatch", "a.sh"]) == ["a.sh"]
-        assert sbatch_opts.strip_sbatch_word(["a.sh"]) == ["a.sh"]
 
 
 class TestSignature:
@@ -173,8 +119,8 @@ class TestFamily:
         assert c["family"] == "smith6jt/batch/cmd:run_step#.sh"
 
     def test_sessions_are_one_family_per_user_and_kind(self, conf):
-        c = classify(job(user="ebutterworth", job_name="ondemand/sys/dashboard/sys/rstudio"), conf)
-        assert c["family"] == "ebutterworth/ood:rstudio" and c["session"] is True
+        c = classify(job(user="bjones", job_name="ondemand/sys/dashboard/sys/rstudio"), conf)
+        assert c["family"] == "bjones/ood:rstudio" and c["session"] is True
 
     def test_gpu_separates_two_scripts_with_one_name(self, conf):
         cpu = classify(job(job_name="vscode", submit_line="sbatch vscode_cpu.sh"), conf)

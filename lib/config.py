@@ -37,6 +37,9 @@ DEFAULT_GENERIC_NAMES = (
 )
 
 
+DEFAULT_DATA_ROOTS = ("/blue", "/orange", "/red", "/scratch", "/home")
+
+
 @dataclass
 class Config:
     """All tunables in one place. See ``hpcsizer.ini.example`` for the INI keys."""
@@ -81,6 +84,9 @@ class Config:
     # Classification
     session_names: List[str] = field(default_factory=lambda: ["vscode"])
     generic_names: List[str] = field(default_factory=lambda: list(DEFAULT_GENERIC_NAMES))
+
+    # File systems searched for a job's input data when a script is analysed
+    data_roots: List[str] = field(default_factory=lambda: list(DEFAULT_DATA_ROOTS))
 
     # Measurement: slurmd samples task usage every this many seconds
     acct_sample_sec: int = 60
@@ -207,6 +213,8 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         raw = get("classify", key)
         if raw:
             setattr(cfg, key, _split(raw))
+    if get("paths", "data_roots"):
+        cfg.data_roots = _split(get("paths", "data_roots"))
 
     # Kept from the previous harvester so existing overrides (and the test
     # suite, which zeroes the backoff) continue to work.

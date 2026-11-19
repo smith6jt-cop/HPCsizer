@@ -197,7 +197,7 @@ class TestFetch:
             dbfile,
             make_job(1, user="alice", submit=BASE_TS),
             make_job(2, user="bob", submit=BASE_TS + 86400),
-            make_job(3, user="alice", submit=BASE_TS + 2 * 86400, account="clive"),
+            make_job(3, user="alice", submit=BASE_TS + 2 * 86400, account="otherlab"),
         )
         with db.reader(dbfile) as conn:
             assert len(db.fetch_jobs(conn)) == 3
@@ -206,7 +206,7 @@ class TestFetch:
                 "3",
             ]
             assert [j["job_id"] for j in db.fetch_jobs(conn, user="alice")] == ["1", "3"]
-            assert [j["job_id"] for j in db.fetch_jobs(conn, accounts=["clive"])] == ["3"]
+            assert [j["job_id"] for j in db.fetch_jobs(conn, accounts=["otherlab"])] == ["3"]
             assert "raw_json" not in db.fetch_jobs(conn)[0]
 
     def test_find_by_displayed_or_raw_id(self, dbfile):
@@ -300,9 +300,7 @@ def v2db(tmp_path):
             v2_row("500_7", name="array-step"),
             v2_row("103", name="hpcsizer-scheduler"),
             v2_row("104", state="RUNNING"),
-            v2_row(
-                "105", peak=None, user="ebutterworth", name="ondemand/sys/dashboard/sys/rstudio"
-            ),
+            v2_row("105", peak=None, user="bjones", name="ondemand/sys/dashboard/sys/rstudio"),
         ],
     )
     holder.commit()

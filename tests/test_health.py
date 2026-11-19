@@ -31,14 +31,14 @@ class TestStatus:
 
     def test_ok_then_stale(self, cfg, stubs):
         stubs.sacct_default(
-            simple_job(1, submit=NOW - DAY) + simple_job(2, submit=NOW - DAY, user="ebutterworth")
+            simple_job(1, submit=NOW - DAY) + simple_job(2, submit=NOW - DAY, user="bjones")
         )
         cfg.first_days = 5
         harvest(cfg)
         fresh = health.status(cfg, now=NOW + 600, with_sacct=False)
         assert fresh["state"] == "ok" and fresh["ok"] is True
         assert fresh["age_sec"] == 600 and fresh["rows"]["total"] == 2
-        assert dict(fresh["recent"]["users"]) == {"smith6jt": 1, "ebutterworth": 1}
+        assert dict(fresh["recent"]["users"]) == {"smith6jt": 1, "bjones": 1}
 
         stale = health.status(cfg, now=NOW + 27 * 3600, with_sacct=False)
         assert stale["state"] == "stale" and stale["ok"] is False
@@ -93,7 +93,7 @@ class TestPreflight:
 
     def test_all_pass_with_working_slurm(self, cfg, stubs, root):
         rows = simple_job(1, submit=NOW - 3600) + simple_job(
-            2, submit=NOW - 7200, user="ebutterworth", submit_line="sbatch --wrap python x.py"
+            2, submit=NOW - 7200, user="bjones", submit_line="sbatch --wrap python x.py"
         )
         stubs.sacct_default(rows)
         stubs.install("scrontab", SCRONTAB_STUB)
@@ -108,7 +108,7 @@ class TestPreflight:
         assert checks["sacct query"]["status"] == "PASS"
         assert checks["epoch timestamps"]["status"] == "PASS"
         assert checks["other members visible"]["status"] == "PASS"
-        assert "ebutterworth" in checks["other members visible"]["detail"]
+        assert "bjones" in checks["other members visible"]["detail"]
         assert checks["value forms"]["status"] == "PASS"
         assert "--wrap" in checks["SubmitLine form"]["detail"]
         assert checks["full-retention query"]["status"] == "PASS"

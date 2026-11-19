@@ -4,7 +4,6 @@ Commands
 --------
 hpg submit <script.sbatch>         Analyze, recommend, confirm, submit with monitoring
 hpg interactive [rstudio|jupyter|vscode|bash]  Launch interactive session with monitoring
-hpg recommend <script.sbatch>      Print recommendation without submitting
 hpg report [--user USER] [--days N]  Group efficiency report
 hpg history [--user USER] [--tool TOOL]  Per-application distributional summaries
 hpg plot <job_id>                  Multi-panel time-series plot
@@ -27,9 +26,9 @@ try:
 except ImportError:
     sys.exit("ERROR: 'click' is required. Install it with: pip install click")
 
-from lib.analyzer import analyze_script
+from lib.legacy_analyzer import analyze_script
 from lib.legacy_db import get_job, init_db, input_gb_from_job, query_jobs
-from lib.recommender import recommend
+from lib.legacy_recommender import recommend
 
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB = os.environ.get("HPCSIZER_DB", str(_REPO_ROOT / "profiles.db"))
@@ -294,35 +293,6 @@ def _apply_recommendations(script_text: str, rec: Dict[str, Any]) -> str:
             f"#SBATCH --time={_format_walltime(rec['time_min'])}",
         )
     return script_text
-
-
-# ---------------------------------------------------------------------------
-# hpg recommend
-# ---------------------------------------------------------------------------
-
-
-@cli.command("recommend")
-@click.argument("script", type=click.Path(exists=True))
-@click.option("--user", default=None, help="Use only this user's job history")
-@click.option("--days", default=90, show_default=True, help="Days of history to consider")
-def recommend_cmd(script: str, user: Optional[str], days: int) -> None:
-    """Print resource recommendation for SCRIPT without submitting.
-
-    History is pooled across all users by default, which gives more samples.
-    Pass --user to size against one person's jobs only.
-    """
-    _ensure_db()
-    meta = analyze_script(script)
-    rec = recommend(
-        meta["static_tools"],
-        meta.get("total_input_gb", 0),
-        meta.get("req_cpus", 1),
-        meta.get("req_gpus", 0),
-        db_path=_DEFAULT_DB,
-        user=user,
-        days=days,
-    )
-    _print_recommendation(meta, rec)
 
 
 # ---------------------------------------------------------------------------

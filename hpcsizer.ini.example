@@ -33,6 +33,8 @@ mail_type = FAIL
 # spool = /blue/mygroup/hpc-sizer/spool
 # logs = /blue/mygroup/hpc-sizer/logs
 # timeseries = /blue/mygroup/hpc-sizer/timeseries
+# File systems searched for a job's input files when a script is analysed.
+# data_roots = /blue, /orange, /red, /scratch, /home
 
 [collector]
 # Every harvest re-reads this many days before the last successful one.
@@ -69,3 +71,6 @@ time_percentile = 0.95
 min_time_min = 15
 oom_raise = 1.5
 timeout_raise = 1.5
+# Fit of peak memory against input size, used for a job without history.
+model_min_points = 10
+model_min_r2 = 0.5

@@ -76,7 +76,7 @@ class TestWhatIsStored:
             "PREEMPTED",
         ]
         for i, state in enumerate(states):
-            rows += simple_job(100 + i, state=state, user=["smith6jt", "ebutterworth"][i % 2])
+            rows += simple_job(100 + i, state=state, user=["smith6jt", "bjones"][i % 2])
         stubs.sacct_default(rows)
         stats = run(cfg)
         jobs = stored(cfg)
@@ -91,7 +91,7 @@ class TestWhatIsStored:
                 "PREEMPTED",
             ]
         )
-        assert {j["user"] for j in jobs.values()} == {"smith6jt", "ebutterworth"}
+        assert {j["user"] for j in jobs.values()} == {"smith6jt", "bjones"}
         assert stats["n_users"] == 2 and stats["n_inserted"] == 7
         assert jobs["103"]["state_raw"] == "CANCELLED by 6084"
 

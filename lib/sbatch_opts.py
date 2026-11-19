@@ -11,7 +11,9 @@ them and carries no ``=value`` has unknown arity; the result is then marked
 ``uncertain`` and callers that would edit the command line must decline.
 """
 
-from typing import List, NamedTuple, Optional, Sequence
+import math
+import re
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 # Short options that take a value (attached "-c8" or separate "-c 8").
 SHORT_WITH_ARG = frozenset("AabBcCdDeFGiJLmMnNopqStwx")
@@ -97,6 +99,7 @@ class ParsedArgs(NamedTuple):
     script_args: List[str]
     uncertain: bool  # an option of unknown arity was seen
     unknown: List[str]
+    het: bool = False  # heterogeneous job: components separated by ":"
 
     def get(self, name: str) -> Optional[str]:
         """Value of the last occurrence of an option (sbatch lets the last one win)."""
@@ -119,11 +122,17 @@ def parse_argv(tokens: Sequence[str]) -> ParsedArgs:
     options: List[Option] = []
     unknown: List[str] = []
     uncertain = False
+    het = False
     i, n = 0, len(tokens)
     script_index: Optional[int] = None
 
     while i < n:
         tok = tokens[i]
+        if tok == ":":
+            # "sbatch -c 4 : -c 1 job.sh": the options of a second component follow.
+            het = True
+            i += 1
+            continue
         if tok == "--":
             if i + 1 < n:
                 script_index = i + 1
@@ -189,7 +198,7 @@ def parse_argv(tokens: Sequence[str]) -> ParsedArgs:
 
     script = tokens[script_index] if script_index is not None else None
     script_args = list(tokens[script_index + 1 :]) if script_index is not None else []
-    return ParsedArgs(options, script_index, script, script_args, uncertain, unknown)
+    return ParsedArgs(options, script_index, script, script_args, uncertain, unknown, het)
 
 
 def strip_sbatch_word(tokens: Sequence[str]) -> List[str]:
@@ -198,3 +207,121 @@ def strip_sbatch_word(tokens: Sequence[str]) -> List[str]:
     if tokens and tokens[0].rsplit("/", 1)[-1] == "sbatch":
         return tokens[1:]
     return tokens
+
+
+# ---------------------------------------------------------------------------
+# Option values
+# ---------------------------------------------------------------------------
+
+_MEM_RE = re.compile(r"^(\d+(?:\.\d+)?)([KMGT])?B?$", re.IGNORECASE)
+_MEM_TO_MB = {"K": 1.0 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024}
+_UNLIMITED = frozenset({"UNLIMITED", "INFINITE", "-1"})
+
+
+def parse_mem(spec: Optional[str]) -> Optional[float]:
+    """Megabytes from ``--mem`` / ``--mem-per-cpu`` / ``--mem-per-gpu`` (default unit: M).
+
+    ``0`` is returned as 0.0: for ``--mem`` it means "all memory of the node",
+    which callers must treat as a request of unknown size, not as zero.
+    """
+    if spec is None:
+        return None
+    match = _MEM_RE.match(spec.strip())
+    if not match:
+        return None
+    return float(match.group(1)) * _MEM_TO_MB[(match.group(2) or "M").upper()]
+
+
+def format_mem(mb: float) -> str:
+    """A whole number with a unit sbatch accepts (``13G``, ``768M``); never ``0``."""
+    mb = max(int(math.ceil(mb)), 1)
+    if mb % 1024 == 0:
+        return "%dG" % (mb // 1024)
+    return "%dM" % mb
+
+
+def parse_time(spec: Optional[str]) -> Tuple[Optional[int], bool]:
+    """``(minutes, unlimited)`` from an sbatch time limit.
+
+    Accepts every form sbatch documents: ``minutes``, ``minutes:seconds``,
+    ``hours:minutes:seconds``, ``days-hours``, ``days-hours:minutes`` and
+    ``days-hours:minutes:seconds``. Seconds round up to the next minute, as
+    Slurm does. ``UNLIMITED``, ``INFINITE`` and ``0`` mean no limit. An
+    unreadable value gives ``(None, False)``.
+    """
+    if spec is None:
+        return None, False
+    text = spec.strip()
+    if text.upper() in _UNLIMITED:
+        return None, True
+    days_text, dash, rest = text.partition("-")
+    if not dash:
+        days_text, rest = "", text
+    parts = rest.split(":")
+    if not all(p.isdigit() for p in parts) or (dash and not days_text.isdigit()):
+        return None, False
+    numbers = [int(p) for p in parts]
+    if dash:
+        if len(numbers) > 3:
+            return None, False
+        hours, minutes, seconds = (numbers + [0, 0])[:3]
+    elif len(numbers) == 1:
+        hours, minutes, seconds = 0, numbers[0], 0
+    elif len(numbers) == 2:
+        hours, (minutes, seconds) = 0, numbers
+    elif len(numbers) == 3:
+        hours, minutes, seconds = numbers
+    else:
+        return None, False
+    total = int(days_text or 0) * 86400 + hours * 3600 + minutes * 60 + seconds
+    if total == 0:
+        return None, True
+    return (total + 59) // 60, False
+
+
+def format_time(minutes: float) -> str:
+    """``D-HH:MM:SS`` (``HH:MM:SS`` under a day) for a limit in minutes; at least one minute."""
+    minutes = max(int(math.ceil(minutes)), 1)
+    days, rest = divmod(minutes, 1440)
+    hours, mins = divmod(rest, 60)
+    if days:
+        return "%d-%02d:%02d:00" % (days, hours, mins)
+    return "%02d:%02d:00" % (hours, mins)
+
+
+def parse_count(spec: Optional[str]) -> Optional[int]:
+    """A node or task count; ``min-max`` ranges give the minimum, ``2k`` is 2048."""
+    if spec is None:
+        return None
+    text = spec.strip().split("-", 1)[0].split(",", 1)[0]
+    scale = 1
+    if text[-1:].lower() == "k":
+        text, scale = text[:-1], 1024
+    elif text[-1:].lower() == "m":
+        text, scale = text[:-1], 1024 * 1024
+    return int(text) * scale if text.isdigit() else None
+
+
+def parse_gpus(spec: Optional[str]) -> Tuple[int, Optional[str]]:
+    """``(count, type)`` from ``--gpus``-style values: ``2``, ``a100:2``, ``a100``."""
+    if not spec:
+        return 0, None
+    parts = [p for p in spec.strip().split(":") if p]
+    if not parts:
+        return 0, None
+    if parts[-1].isdigit():
+        return int(parts[-1]), (parts[-2] if len(parts) > 1 else None)
+    return 1, parts[-1]
+
+
+def parse_gres_gpus(spec: Optional[str]) -> Tuple[int, Optional[str]]:
+    """GPUs per node from ``--gres``: ``gpu``, ``gpu:2``, ``gpu:a100:2``, ``gpu:1,lustre:1``."""
+    count, kind = 0, None
+    for item in (spec or "").split(","):
+        parts = [p for p in item.strip().split(":") if p]
+        if not parts or parts[0].rsplit("/", 1)[-1] != "gpu":
+            continue
+        n, k = parse_gpus(":".join(parts[1:])) if len(parts) > 1 else (1, None)
+        count += n
+        kind = kind or k
+    return count, kind

@@ -184,6 +184,7 @@ MONITOR_COLUMNS = (
     "cpu_sec",
     "max_cores",
     "avg_cores",
+    "p95_cores",
     "gpu_util_max",
     "gpu_mem_max_bytes",
     "oom_kills",
@@ -315,8 +316,9 @@ CREATE TABLE IF NOT EXISTS job_monitor (
     peak_mem_bytes  INTEGER,            -- resident memory high-water mark
     peak_usage_bytes INTEGER,           -- cgroup usage incl. page cache
     cpu_sec         REAL,
-    max_cores       REAL,
+    max_cores       REAL,               -- busiest sample
     avg_cores       REAL,
+    p95_cores       REAL,               -- cores in use that 95% of the samples stay under
     gpu_util_max    REAL,
     gpu_mem_max_bytes INTEGER,
     oom_kills       INTEGER,

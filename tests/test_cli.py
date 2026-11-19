@@ -33,7 +33,7 @@ def recent(jid, **kwargs):
 
 class TestHarvest:
     def test_harvest_creates_the_database(self, env, root, capsys):
-        env.sacct_default(recent(1) + recent(2, user="ebutterworth"))
+        env.sacct_default(recent(1) + recent(2, user="bjones"))
         assert hpg("harvest") == 0
         err = capsys.readouterr().err
         assert "2 new" in err and "2 user(s)" in err
@@ -87,13 +87,13 @@ class TestStatus:
     def test_missing_then_ok(self, env, capsys):
         assert hpg("status", "--no-sacct") == 1
         assert "STATUS: MISSING" in capsys.readouterr().out
-        env.sacct_default(recent(1) + recent(2, user="ebutterworth"))
+        env.sacct_default(recent(1) + recent(2, user="bjones"))
         hpg("harvest")
         capsys.readouterr()
         assert hpg("status", "--no-sacct") == 0
         out = capsys.readouterr().out
         assert "STATUS: OK" in out and "Last harvest" in out
-        assert "smith6jt 1" in out and "ebutterworth 1" in out
+        assert "smith6jt 1" in out and "bjones 1" in out
 
     def test_json(self, env, capsys):
         env.sacct_default(recent(1))
@@ -168,6 +168,172 @@ class TestSchedule:
     def test_error_is_reported(self, env, root, capsys):
         assert hpg("schedule", "install") == 1
         assert "launcher not found" in capsys.readouterr().err
+
+
+class TestRecommend:
+    @pytest.fixture
+    def stored(self, env, monkeypatch, tmp_path, capsys):
+        """Six finished runs of one job: 64 GB and 16 CPUs requested, 10 GB and 3 cores used.
+
+        The peak is the batch step plus the extern step, a little over 10 GB,
+        so 1.2 times it rounds up to 13 GB.
+        """
+        import time
+
+        now = int(time.time())
+        rows = []
+        for i in range(6):
+            rows += simple_job(
+                100 + i,
+                name="mplx12k-spleen",
+                submit_line="sbatch run_mplx.sh",
+                mem="64G",
+                cpus=16,
+                timelimit=2880,
+                elapsed=3600,
+                submit=now - (7 - i) * 12 * 3600,
+                batch_max_rss="10485760K",
+                batch_total_cpu="03:00:00",
+            )
+        env.sacct_default(rows)
+        assert hpg("harvest") == 0
+        monkeypatch.setenv("USER", "smith6jt")
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "run_mplx.sh").write_text(
+            "#!/bin/bash\n#SBATCH --job-name=mplx12k-spleen\n#SBATCH --mem=64G -c 16 -t 2-0\n"
+            "python run.py\n"
+        )
+        monkeypatch.chdir(work)
+        capsys.readouterr()
+        return env
+
+    def test_script(self, stored, capsys):
+        assert hpg("recommend", "run_mplx.sh") == 0
+        out = capsys.readouterr().out
+        assert "6 runs named mplx12k-spleen by smith6jt" in out
+        memory = next(line for line in out.splitlines() if line.startswith("Memory"))
+        assert "64 GB" in memory and "13 GB" in memory and "-80%" in memory
+        assert "#SBATCH --mem=13G" in out and "#SBATCH --cpus-per-task=4" in out
+        assert out.rstrip().splitlines()[-1].startswith("Data as of ")
+
+    def test_sbatch_options_are_read_as_sbatch_reads_them(self, stored, capsys):
+        """Options before the script override it; what follows the script is the script's."""
+        assert hpg("recommend", "--json", "--mem=8G", "-c", "2", "run_mplx.sh", "--json") == 0
+        rec = json.loads(capsys.readouterr().out)
+        assert rec["mem"]["requested"] == 8192 and rec["cpus"]["requested"] == 2
+        assert rec["mem"]["action"] == "raise" and rec["mem"]["suggested"] == 13 * 1024
+        assert rec["target"]["request"]["time_min"] == 2880
+        assert rec["data"]["as_of_ts"] and rec["source"] == "history"
+
+    def test_name(self, stored, capsys):
+        assert hpg("recommend", "--name", "mplx12k-spleen") == 0
+        out = capsys.readouterr().out
+        assert "64 GB (last run)" in out and "#SBATCH --mem=13G" in out
+
+    def test_other_user(self, stored, capsys):
+        assert hpg("recommend", "--user", "bjones", "--name", "mplx12k-spleen") == 3
+        assert "no comparable runs are stored" in capsys.readouterr().out
+
+    def test_like_a_stored_job(self, stored, capsys):
+        assert hpg("recommend", "--like", "103") == 0
+        assert "like job 103" in capsys.readouterr().out
+        assert hpg("recommend", "--like", "999") == 3
+        assert "no stored job 999" in capsys.readouterr().err
+
+    def test_wrap_without_history_exits_3(self, stored, capsys):
+        assert hpg("recommend", "--wrap", "python never_run.py") == 3
+        out = capsys.readouterr().out
+        assert "smith6jt/wrap/cmd:python:never_run.py" in out and "#SBATCH" not in out
+
+    def test_days_narrows_the_window(self, stored, capsys):
+        assert hpg("recommend", "--days", "1", "--name", "mplx12k-spleen") == 3
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            [],
+            ["--name", "a", "run_mplx.sh"],
+            ["--name", "a", "--kind", "vscode"],
+            ["--kind", "batch"],
+            ["missing.sh"],
+            ["--mem=4G"],
+        ],
+    )
+    def test_usage_errors(self, stored, capsys, argv):
+        assert hpg("recommend", *argv) == 2
+        assert "hpg recommend:" in capsys.readouterr().err
+
+    def test_refreshes_stale_data_unless_told_not_to(self, stored, root, capsys):
+        conn = sqlite3.connect(str(root / "profiles.db"))
+        conn.execute("UPDATE meta SET value = value - 3600 WHERE key='watermark_ts'")
+        conn.commit()
+        conn.close()
+        calls = len(stored.sacct_calls())
+        assert hpg("recommend", "--no-refresh", "--name", "mplx12k-spleen") == 0
+        assert len(stored.sacct_calls()) == calls
+        assert hpg("recommend", "--name", "mplx12k-spleen") == 0
+        refreshed = len(stored.sacct_calls())
+        assert refreshed > calls
+        assert hpg("recommend", "--name", "mplx12k-spleen") == 0
+        assert len(stored.sacct_calls()) == refreshed, "fresh again: sacct is not asked twice"
+
+    def test_no_database(self, env, capsys):
+        env.remove("sacct")
+        assert hpg("recommend", "--name", "x") == 1
+        assert "no database" in capsys.readouterr().err
+
+    def test_help_does_not_need_a_job(self, capsys):
+        with pytest.raises(SystemExit) as exit_info:
+            hpg("recommend", "--help")
+        assert exit_info.value.code == 0
+        assert "hpg recommend --like 51598968" in capsys.readouterr().out
+
+
+class TestPassThrough:
+    def test_hpg_options_come_first(self):
+        own, rest = cli.split_passthrough(
+            "recommend", ["--json", "--user", "u", "--days=30", "-c", "4", "job.sh", "--json"]
+        )
+        assert own == ["--json", "--user", "u", "--days=30"]
+        assert rest == ["-c", "4", "job.sh", "--json"]
+
+    def test_explicit_separator(self):
+        own, rest = cli.split_passthrough("recommend", ["--json", "--", "--name", "x.sh"])
+        assert own == ["--json"] and rest == ["--name", "x.sh"]
+
+    def test_nothing_to_pass(self):
+        assert cli.split_passthrough("recommend", ["--name", "x"]) == (["--name", "x"], [])
+
+
+class TestBacktest:
+    def test_report_and_json(self, env, capsys):
+        import time
+
+        now = int(time.time())
+        rows = []
+        for i in range(6):
+            rows += simple_job(
+                200 + i,
+                name="align",
+                mem="64G",
+                elapsed=3600,
+                submit=now - (7 - i) * 12 * 3600,
+                batch_max_rss="10485760K",
+            )
+        env.sacct_default(rows)
+        assert hpg("harvest") == 0
+        capsys.readouterr()
+        assert hpg("backtest", "--no-refresh", "--set", "mem_headroom=1.5") == 0
+        out = capsys.readouterr().out
+        assert "Backtest of 6 jobs" in out and "custom" in out and "Data as of" in out
+        assert hpg("backtest", "--no-refresh", "--json") == 0
+        data = json.loads(capsys.readouterr().out)
+        configured = next(p for p in data["policies"] if p["name"] == "configured")
+        assert configured["mem"]["sized"] == 3 and configured["mem"]["short"] == 0
+        assert hpg("backtest", "--no-refresh", "--user", "nobody") == 3
+        assert hpg("backtest", "--no-refresh", "--set", "bogus=1") == 2
+        assert "--set takes KEY=VALUE" in capsys.readouterr().err
 
 
 def test_version(capsys):

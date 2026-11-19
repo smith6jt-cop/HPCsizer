@@ -34,6 +34,7 @@ import os
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -66,6 +67,8 @@ COLUMNS = (
 MAX_PIDS = 512
 MAX_ROWS_FAST = 20000  # beyond this, sample every five minutes
 JOB_COMPONENT = re.compile(r"^job_(\d+)$")
+UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]")
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 _stop = []
 
@@ -594,15 +597,53 @@ def fmt(value):
     return str(value)
 
 
-def open_series(spool, job_id, node):
-    """Open the series file for appending, creating it group-readable. Returns ``(fd, path)``."""
-    path = os.path.join(spool, "%s.%s.tsv" % (job_id, node))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+def own_plain_file(fd):
+    """True when ``fd`` is a regular file of this user that has no second name."""
     try:
-        os.fchmod(fd, 0o640)  # whatever the job's umask: the harvester must be able to read it
+        info = os.fstat(fd)
     except OSError:
-        pass
-    return fd, path
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+
+
+def open_series(spool, job_id, node):
+    """Open the series file for appending, creating it group-readable. Returns ``(fd, path)``.
+
+    The spool is writable by the whole group, so the name this job would use
+    may already be taken by something another member put there: a link to one
+    of this user's files, a pipe, a file of their own. A new file is therefore
+    created exclusively and without following links; one that exists is only
+    appended to when it is a plain file of this user with no other name (the
+    job was requeued). Otherwise the series goes to a name of its own.
+    """
+    job_id = str(job_id)
+    if not job_id.isdigit():
+        raise OSError(errno.EINVAL, "not a job id: %r" % job_id)
+    base = os.path.join(spool, "%s.%s" % (job_id, UNSAFE_IN_NAME.sub("_", node) or "node"))
+    names = [base + ".tsv"] + ["%s-%d-%d.tsv" % (base, os.getpid(), n) for n in range(3)]
+    create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | NOFOLLOW
+    for index, path in enumerate(names):
+        try:
+            fd = os.open(path, create, 0o640)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            if index:
+                continue
+            try:
+                # Non-blocking, so that a pipe left under this name cannot hold the job's sampler.
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | NOFOLLOW)
+            except OSError:
+                continue
+            if not own_plain_file(fd):
+                os.close(fd)
+                continue
+        try:
+            os.fchmod(fd, 0o640)  # whatever the job's umask: the harvester must be able to read it
+        except OSError:
+            pass
+        return fd, path
+    raise OSError(errno.EEXIST, "no usable name for the series of job %s in %s" % (job_id, spool))
 
 
 def write_line(fd, text):

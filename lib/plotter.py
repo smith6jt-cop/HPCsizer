@@ -166,11 +166,17 @@ def plot_job(
     return out_path
 
 
-def load(paths: Sequence[str]) -> List[Tuple[Dict[str, str], List[Dict[str, Any]]]]:
-    """Read the per-node series files of a job, naming each by its node."""
+def load(
+    paths: Sequence[str], owner: Optional[str] = None
+) -> List[Tuple[Dict[str, str], List[Dict[str, Any]]]]:
+    """Read the per-node series files of a job, naming each by its node.
+
+    A file that is still in the group-writable spool is only read when it
+    belongs to ``owner``, the job's user; archives were checked when stored.
+    """
     out = []
     for path in paths:
-        meta, rows = profile.read_series(path)
+        meta, rows = profile.read_series(path, owner=None if path.endswith(".gz") else owner)
         parts = profile.split_name(path)
         if parts:
             meta.setdefault("node", parts[1])

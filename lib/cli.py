@@ -787,7 +787,8 @@ def cmd_plot(args: argparse.Namespace, cfg: Config) -> int:
             _err("  " + path)
         return EXIT_ERROR
     try:
-        out = plotter.plot_job(job, plotter.load(paths), args.out or plotter.default_name(job))
+        series = plotter.load(paths, owner=job.get("user"))
+        out = plotter.plot_job(job, series, args.out or plotter.default_name(job))
     except (plotter.PlotError, OSError) as exc:
         _err("hpg plot: %s" % exc)
         return EXIT_ERROR

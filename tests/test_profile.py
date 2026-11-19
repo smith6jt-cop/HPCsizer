@@ -208,6 +208,19 @@ class TestSeveralNodes:
         )
         assert profile.summarize([a, b])["peak_mem_bytes"] == 16 * GIB
 
+    def test_profile_of_some_of_a_jobs_nodes_covers_that_share_of_it(self):
+        one = parsed(steady(30), node="c1")
+        summary = profile.summarize([one], job_elapsed_sec=290, alloc_nodes=2)
+        assert summary["coverage"] == 0.5
+        detail = json.loads(summary["summary_json"])
+        assert detail["nodes_allocated"] == 2
+        assert any("profiled on 1 of the job's 2 nodes" in note for note in detail["notes"])
+        both = profile.summarize(
+            [one, parsed(steady(30), node="c2")], job_elapsed_sec=290, alloc_nodes=2
+        )
+        assert both["coverage"] == 1.0
+        assert profile.summarize([one], job_elapsed_sec=290, alloc_nodes=1)["coverage"] == 1.0
+
     def test_idle_nodes_and_imbalance(self):
         busy = parsed(steady(20, cores=8.0), node="a")
         idle = parsed(steady(20, cores=0.0), node="b")
@@ -383,6 +396,32 @@ class TestIngest:
         names = sorted(os.path.basename(p) for p in profile.series_files(cfg, stored(cfg)["4242"]))
         assert [n.split(".")[1] for n in names] == ["c1", "c1_2"]
 
+    def test_names_in_the_log_cannot_forge_lines_or_colour_a_terminal(self, cfg, stubs, spool, now):
+        """The node part of a spool file name is chosen by whoever creates the file."""
+        stubs.sacct_default(self.job(now, user=OTHER))
+        name = "4242.c1\x1b[31m\n[harvest] all is well.tsv"
+        with open(os.path.join(spool, name), "w") as handle:
+            handle.write(series_text(steady(30), start=now - 3570))
+        messages = []
+        harvest(cfg, now, messages.append)
+        about = [m for m in messages if "4242." in m]
+        assert about, "the file is reported"
+        assert all("\x1b" not in m and "\n" not in m for m in messages)
+        assert any("\\x1b[31m\\x0a[harvest] all is well.tsv ignored" in m for m in about)
+
+    def test_archive_follows_the_databases_directory(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        self.write(spool, now)
+        os.chmod(cfg.root, 0o750)
+        try:
+            harvest(cfg, now)
+            (archive,) = profile.series_files(cfg, stored(cfg)["4242"])
+            assert oct(os.stat(archive).st_mode & 0o777) == "0o640"
+            assert oct(os.stat(cfg.ts_dir).st_mode & 0o777) == "0o750"
+            assert oct(os.stat(cfg.db_path).st_mode & 0o777) == "0o640"
+        finally:
+            os.chmod(cfg.root, 0o755)
+
     def test_archive_is_readable_like_the_database(self, cfg, stubs, spool, now):
         stubs.sacct_default(self.job(now))
         self.write(spool, now)
@@ -398,6 +437,16 @@ class TestIngest:
         stubs.sacct_default(self.job(now))
         self.write(spool, now, start=now - 90 * 86400)
         assert harvest(cfg, now)["n_profiles"] == 0
+
+    def test_two_node_job_profiled_on_one_node_is_a_lower_bound(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now, nodes=2, batch_max_rss="31457280K"))
+        self.write(spool, now, node="c1")
+        assert harvest(cfg, now)["n_profiles"] == 1
+        job = stored(cfg)["4242"]
+        assert job["mon_coverage"] == 0.5 and job["mon_peak_mem_bytes"] == 10 * GIB
+        assert job["m"]["mem_used_gb"] == pytest.approx(30, abs=0.1)
+        assert job["m"]["mem_source"] == "sacct"
+        assert job["m"]["cores_p95"] is None, "not a statement about the whole job"
 
     def test_several_nodes(self, cfg, stubs, spool, now):
         stubs.sacct_default(self.job(now, nodes=2))

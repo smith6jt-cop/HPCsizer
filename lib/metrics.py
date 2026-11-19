@@ -52,6 +52,8 @@ TIME_OVERREQUEST_RATIO = 0.25
 TIME_MIN_LIMIT_MIN = 60
 GPU_IDLE_PERCENT = 5.0
 PROFILE_COVERAGE = 0.9
+# How lib/slurm.py arrived at a job's peak when it is not one step's measured value.
+ESTIMATED_PEAKS = frozenset({"overlap_sum", "ntasks_est"})
 
 _KILLED = frozenset({"TIMEOUT", "CANCELLED", "NODE_FAIL", "PREEMPTED", "OUT_OF_MEMORY", "DEADLINE"})
 
@@ -98,13 +100,20 @@ def job_metrics(
     elapsed = job.get("elapsed_sec") or 0
     elapsed_h = elapsed / 3600.0
 
-    # A profile is the whole truth when it read the job's cgroup for (nearly)
-    # the whole run. Otherwise it is one more lower bound, like accounting, and
-    # the larger of the two is used.
-    trusted = (
+    # Accounting and a profile each see a job from one side, and each can only
+    # miss something: accounting samples about once a minute and records no CPU
+    # time for a step Slurm had to kill; the sampler's last sample may precede
+    # the end of the job, and a spike can fall between two of its samples. So
+    # the larger figure is the better one. The one exception: accounting's peak
+    # is sometimes not a measurement but the sum of the peaks of steps that ran
+    # side by side, or an estimate over the tasks of a step, and both can
+    # overstate. Where a profile read the job's cgroup for (nearly) the whole
+    # run, its figure replaces such an estimate.
+    whole_run = (
         str(job.get("mon_source") or "").startswith("cgroup")
         and (job.get("mon_coverage") or 0) >= PROFILE_COVERAGE
     )
+    sacct_estimate = job.get("mem_src") in ESTIMATED_PEAKS
 
     # -- memory --------------------------------------------------------------
     req_mem_mb = job.get("req_mem_mb")
@@ -113,7 +122,9 @@ def job_metrics(
     mem_source: Optional[str] = None
     monitor_peak = job.get("mon_peak_mem_bytes")
     sacct_peak = job.get("peak_mem_bytes") if elapsed >= 2 * cfg.acct_sample_sec else None
-    if monitor_peak and (trusted or not sacct_peak or monitor_peak >= sacct_peak):
+    if monitor_peak and (
+        not sacct_peak or monitor_peak >= sacct_peak or (whole_run and sacct_estimate)
+    ):
         mem_used_gb, mem_source = monitor_peak / GIB, "profile"
     elif sacct_peak:
         mem_used_gb, mem_source = sacct_peak / GIB, "sacct"
@@ -127,13 +138,17 @@ def job_metrics(
     if sacct_cpu is not None and state in _KILLED and job.get("cpu_src") not in ("polled", "mixed"):
         sacct_cpu = None  # rusage of a step Slurm killed: near zero whatever it did
     monitor_cpu = job.get("mon_cpu_sec")
-    if monitor_cpu is not None and (trusted or sacct_cpu is None or monitor_cpu >= sacct_cpu):
+    if monitor_cpu is not None and (sacct_cpu is None or monitor_cpu >= sacct_cpu):
         cpu_sec, cpu_source = monitor_cpu, "profile"
     elif sacct_cpu is not None:
         cpu_sec, cpu_source = sacct_cpu, job.get("cpu_src") or "rusage"
     cores_used = cpu_sec / elapsed if cpu_sec is not None and elapsed >= 60 else None
     cores_peak = job.get("mon_max_cores")
-    cores_p95 = job.get("mon_p95_cores")
+    # The sustained core count is a statement about the whole job. A profile
+    # that saw only part of it -- some of its run time, one of its nodes, or
+    # (without a cgroup) only the batch script's own processes and not what
+    # srun started -- cannot make it.
+    cores_p95 = job.get("mon_p95_cores") if whole_run else None
     cpu_eff = cores_used / cores_alloc if cores_used is not None and cores_alloc else None
 
     # -- time ----------------------------------------------------------------

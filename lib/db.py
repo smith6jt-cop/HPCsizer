@@ -36,7 +36,7 @@ import sqlite3
 import stat
 import tempfile
 import time
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 SCHEMA_VERSION = 3
@@ -174,7 +174,14 @@ HARVEST_COLUMNS = (
     "n_users",
     "n_profiles",
     "parser_version",
+    "n_unchanged",
 )
+
+# Columns added to a version 3 table after its first release. Code that does
+# not know a column is not disturbed by it (every reader names what it reads or
+# takes the row as a mapping), so adding one needs no new schema version: the
+# next writer adds what is missing.
+ADDED_COLUMNS = (("harvest_runs", "n_unchanged", "INTEGER"),)
 
 MONITOR_COLUMNS = (
     "source",
@@ -357,6 +364,10 @@ def _q(columns: Sequence[str]) -> str:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table, column, declared in ADDED_COLUMNS:
+        present = {row[1] for row in conn.execute('PRAGMA table_info("%s")' % table)}
+        if column not in present:
+            conn.execute('ALTER TABLE "%s" ADD COLUMN "%s" %s' % (table, column, declared))
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -797,7 +808,7 @@ class SnapshotWriter:
         staged = "%s.tmp.%s.%d" % (self.db_path, socket.gethostname(), os.getpid())
         try:
             shutil.copyfile(self.local, staged)
-            os.chmod(staged, 0o644)
+            set_shared(staged, os.path.dirname(os.path.abspath(self.db_path)))
             _fsync_file(staged)
             # If the published file changed since it was copied, another writer
             # got past the lock; publishing would discard its work.
@@ -824,11 +835,54 @@ class SnapshotWriter:
         self.lock.release()
 
 
+def shared_modes(directory: str) -> Tuple[int, int]:
+    """``(file mode, directory mode)`` for what is published in ``directory``.
+
+    Who may read the database is decided in one place: the directory it lies
+    in. Whoever may enter that directory may read what is published there, and
+    nobody else -- a 2750 directory gives 0640 files, an open one 0644, a
+    private one 0600 -- whatever the umask of the process that writes it.
+    """
+    try:
+        mode = os.stat(directory).st_mode
+    except OSError:
+        return 0o640, 0o750
+    group = bool(mode & stat.S_IXGRP)
+    other = bool(mode & stat.S_IXOTH)
+    return (
+        0o600 | (0o040 if group else 0) | (0o004 if other else 0),
+        0o700 | (0o050 if group else 0) | (0o005 if other else 0),
+    )
+
+
+def set_shared(path: str, directory: str) -> None:
+    """Give a freshly written file the readers of ``directory``."""
+    mode, _dir_mode = shared_modes(directory)
+    try:
+        group = os.stat(directory).st_gid
+        if os.stat(path).st_gid != group:
+            try:
+                os.chown(path, -1, group)
+            except OSError:
+                # The file cannot be given the directory's group, so its group
+                # bits would name the wrong people. Those the directory lets in
+                # then read it as "others"; the directory still keeps everybody
+                # else out.
+                mode |= 0o004 if mode & 0o040 else 0
+    except OSError:
+        pass
+    os.chmod(path, mode)
+
+
 def _insert(conn: sqlite3.Connection, table: str, columns: Sequence[str], values: Sequence[Any]):
     return conn.execute(
         "INSERT INTO %s (%s) VALUES (%s)" % (table, _q(columns), ", ".join("?" * len(columns))),
         list(values),
     )
+
+
+def _step_key(values: Sequence[Any]) -> str:
+    return str(values[STEP_COLUMNS.index("step_id")])
 
 
 def upsert_job(
@@ -837,7 +891,12 @@ def upsert_job(
     steps: Sequence[Mapping[str, Any]] = (),
     now: Optional[int] = None,
 ) -> str:
-    """Insert or update a job and replace its steps. Returns 'inserted' or 'updated'.
+    """Insert or update a job and replace its steps.
+
+    Returns 'inserted', 'updated' or 'unchanged'. Every harvest reads the last
+    days again, so most of what it sees is already stored exactly as sacct
+    reports it; such a row is left alone, and ``updated_ts`` is the time its
+    content last changed.
 
     Only sacct-owned columns are updated, so ``first_seen_ts`` survives and
     rows in ``job_monitor`` / ``job_context`` are untouched. (The previous
@@ -849,9 +908,17 @@ def upsert_job(
         raise ValueError("a sacct job needs job_id_raw and submit_ts")
     values = [job.get(col) for col in JOB_COLUMNS]
     existing = conn.execute(
-        "SELECT id FROM jobs WHERE job_id_raw=? AND submit_ts=?",
+        "SELECT id, %s FROM jobs WHERE job_id_raw=? AND submit_ts=?" % _q(JOB_COLUMNS),
         (job["job_id_raw"], job["submit_ts"]),
     ).fetchone()
+    if existing is not None and list(existing)[1:] == values:
+        stored_steps = conn.execute(
+            "SELECT %s FROM steps WHERE job_pk=? ORDER BY step_id" % _q(STEP_COLUMNS),
+            (existing[0],),
+        ).fetchall()
+        given = sorted(([step.get(c) for c in STEP_COLUMNS] for step in steps), key=_step_key)
+        if [list(row) for row in stored_steps] == given:
+            return "unchanged"
     update_cols = [c for c in JOB_COLUMNS if c not in ("job_id_raw", "submit_ts")]
     conn.execute(
         "INSERT INTO jobs (%s, first_seen_ts, updated_ts) VALUES (%s, ?, ?) "
@@ -925,8 +992,8 @@ def upsert_context(
 def latest_job_pk(conn: sqlite3.Connection, job_id_raw: int) -> Optional[sqlite3.Row]:
     """Most recent stored incarnation of a raw job id, with what profile ingestion needs."""
     return conn.execute(
-        'SELECT id, "user", job_id, submit_ts, start_ts, end_ts, elapsed_sec, alloc_cpus, state '
-        "FROM jobs WHERE job_id_raw=? ORDER BY submit_ts DESC LIMIT 1",
+        'SELECT id, "user", job_id, submit_ts, start_ts, end_ts, elapsed_sec, alloc_cpus, '
+        "alloc_nodes, state FROM jobs WHERE job_id_raw=? ORDER BY submit_ts DESC LIMIT 1",
         (int(job_id_raw),),
     ).fetchone()
 
@@ -1139,7 +1206,7 @@ def migrate_v2(
 
         staged = "%s.tmp.%s.%d" % (db_path, socket.gethostname(), os.getpid())
         shutil.copyfile(new_local, staged)
-        os.chmod(staged, 0o644)
+        set_shared(staged, os.path.dirname(os.path.abspath(db_path)))
         _fsync_file(staged)
         os.replace(staged, db_path)
         for suffix in ("-wal", "-shm"):

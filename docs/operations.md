@@ -181,7 +181,7 @@ HPCsizer 3.0.0
   Database        : /blue/mygroup/hpc-sizer/profiles.db (schema 3, 392.0 KB)
   Accounts        : mygroup
   Last harvest    : 2026-11-19 18:47 (0 s ago) on login5, manual
-                    167 records: 0 new, 158 updated, 3 still open, 6 internal, 0 unparsed, 0 late
+                    167 records: 0 new, 2 changed, 156 unchanged, 3 still open, 6 internal, 0 unparsed, 0 late
   Deep pass       : 2026-11-19 18:47
   Rows            : 158 (sacct 158)
   Last 30 days    : alice 61 | bjones 48 | cchen 28 | dpatel 8
@@ -305,7 +305,7 @@ and says when there are others.
 | What | Who needs what |
 |---|---|
 | the checkout (`bin/`, `lib/`) | members: read. **Nobody but you: write.** A profiled job runs `bin/monitor.py` as the member who submitted it; if others could edit that file they could run code inside everyone's jobs. `hpg status` and `hpg preflight` warn when it is group- or world-writable. |
-| `profiles.db`, `timeseries/` | members: read |
+| `profiles.db`, `timeseries/` | members: read. Their modes follow the directory the database is in: whoever may enter it may read them (a 2750 directory gives 0640 files), whatever the umask of the harvest. Close that directory to others (`chmod o-rx`): the database holds every member's job names, command lines and working directories. `hpg status` and `hpg preflight` say so when users outside the group can read it. |
 | `spool/`, `spool/submit/` | members: write. Created by the first harvest with mode 3770 — group-writable, setgid, sticky: members' jobs can add files, nobody can remove another's. |
 
 Every member can write to the spool, so any member can put anything there
@@ -349,9 +349,26 @@ of the script (or in front of a `--wrap` command):
 cgroup; `hpg preflight --compute` runs a one-minute job that reports which
 cgroup version the compute nodes use.
 
-On a job with several nodes the first sampler starts one on every other node
-with `srun --overlap`; each writes its own file and the harvester combines
-them. This adds one step to the job's accounting.
+On a job with several nodes the first sampler starts one more sampler on each
+other node through `srun --overlap --mem=0`; each writes its own file and the
+harvester combines them. That is one more step in the job, visible in its
+accounting. `--overlap` lets it share the job's CPUs with the job's own steps
+and `--mem=0` makes it ask for no memory of its own.
+
+This has been tried on Slurm 23.11 without cgroups: in twelve runs (jobs
+requested with `--mem` and with `--mem-per-cpu`, the sampler's step before and
+after the job's own) the job's own `srun` steps ran at once and succeeded every
+time. It has not been tried on the cluster's Slurm version: after the first
+multi-node job submitted with `hpg submit`, check that `hpg job ID` lists every
+node and that the job ran as usual. `multi_node = no` under `[profile]` turns
+it off; then only the node that runs the batch script is profiled, the profile
+is marked "profiled on 1 of N nodes" and counts as a lower bound for the job,
+while accounting's per-step figures cover the other nodes.
+
+Where no cgroup of the job is found (a cluster without the cgroup plugins) the
+sampler follows the batch script's process tree instead. That does not include
+what `srun` starts, so such a profile (`proc`) is only ever a lower bound and
+is not used to judge a CPU count.
 
 A series is ingested once its job is stored, and archived under `timeseries/`.
 The spool copy is removed by the following harvest; series whose job never
@@ -396,6 +413,7 @@ check:
 | value forms | `TotalCPU` and `MaxRSS` are in a known form | FAIL shows the value |
 | full-retention query | 182 days can be queried in one go | lower `first_days` or `slice_days` |
 | unfinished jobs query | `sacct -s PENDING,RUNNING` lists the present | only `hpg queue` is affected |
+| database privacy | users outside the group cannot read the database | WARN: `chmod o-rx` the directory it is in; the next harvest closes the file as well |
 | scrontab enabled / answers | `scrontab` can be used | `hpg schedule install --mode chain` |
 | code permissions | nobody else can write the code | `chmod go-w` |
 | compute node (`--compute`) | which cgroup version jobs run under; Python on the nodes | set `compute_python` |

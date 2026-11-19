@@ -3,6 +3,11 @@
 # Environment variables HPCSIZER_DB, HPCSIZER_ACCT, HPCSIZER_ROOT and
 # HPCSIZER_SPOOL override the matching keys here. The scheduled harvest runs
 # without your shell environment, so set the accounts in this file.
+#
+# A number that is not usable (last_n = 0, a headroom below 1, text where a
+# number belongs) is not used: every hpg command says so on standard error and
+# works with the default. Neither that nor a file that cannot be read at all
+# keeps `hpg submit` from submitting a job.
 
 [slurm]
 # Slurm account(s) whose jobs are collected, comma-separated.
@@ -60,6 +65,12 @@ session_names = vscode
 # counters of the busiest process every five minutes (needs `perf` on the
 # compute nodes and kernel.perf_event_paranoid <= 2).
 perf = no
+# On a job with several nodes the sampler starts one more sampler on each
+# other node through `srun --overlap --mem=0`, so that every node is profiled.
+# That is one more step in the job, visible in its accounting. With
+# multi_node = no only the node that runs the batch script is profiled, and the
+# profile counts as a lower bound for the job.
+multi_node = yes
 # The spool is created by the first harvest with this mode: writable by the
 # group (so members' jobs can record profiles), setgid and sticky. Use 0700 to
 # profile only your own jobs.

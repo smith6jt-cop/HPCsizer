@@ -250,6 +250,10 @@ cgroup every few seconds (every 2 s for the first two minutes), so short jobs,
 killed jobs and sessions get a real peak, real CPU time and a *sustained* core
 count. A CPU reduction for a session is only ever suggested from such profiles.
 
+What is recorded about a job, and who can read it, is listed in
+[docs/sizing-jobs.md](docs/sizing-jobs.md#questions): everything is readable by
+the group and by nobody else.
+
 ## How it is built
 
 - `lib/slurm.py` is the only place that talks to and parses `sacct`.

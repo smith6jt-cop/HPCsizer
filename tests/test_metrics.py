@@ -161,20 +161,59 @@ class TestFlags:
 
 
 class TestProfileAgainstAccounting:
-    def test_cgroup_profile_of_the_whole_run_is_believed(self, conf):
-        """Accounting's sum over steps can only overestimate; the cgroup figure is the job."""
+    def test_cgroup_profile_replaces_a_sum_or_estimate_over_steps(self, conf):
+        """Accounting's sum over steps that ran side by side can only overestimate;
+        a cgroup profile of the whole run is the job."""
+        for how in ("overlap_sum", "ntasks_est"):
+            m = job_metrics(
+                job(
+                    peak_mem_bytes=30 * GIB,
+                    mem_src=how,
+                    mon_source="cgroup-v2",
+                    mon_coverage=0.99,
+                    mon_peak_mem_bytes=12 * GIB,
+                ),
+                conf,
+            )
+            assert m["mem_used_gb"] == 12 and m["mem_source"] == "profile"
+
+    def test_profile_does_not_hide_a_peak_that_accounting_measured(self, conf):
+        """A spike between two samples of the sampler is still a spike: one step's
+        measured peak is a lower bound that no profile can undercut."""
+        for how in ("step", "job"):
+            m = job_metrics(
+                job(
+                    peak_mem_bytes=30 * GIB,
+                    mem_src=how,
+                    mon_source="cgroup-v2",
+                    mon_coverage=0.99,
+                    mon_peak_mem_bytes=12 * GIB,
+                ),
+                conf,
+            )
+            assert m["mem_used_gb"] == 30 and m["mem_source"] == "sacct"
+
+    def test_cpu_time_is_the_larger_of_the_two_whatever_the_profile(self, conf):
+        """The sampler's last sample can precede the end of the job; rusage cannot."""
         m = job_metrics(
             job(
-                peak_mem_bytes=30 * GIB,
                 cpu_sec=5 * 3600.0,
                 mon_source="cgroup-v2",
                 mon_coverage=0.99,
-                mon_peak_mem_bytes=12 * GIB,
                 mon_cpu_sec=4 * 3600.0,
             ),
             conf,
         )
-        assert m["mem_used_gb"] == 12 and m["mem_source"] == "profile"
+        assert m["cores_used"] == 5 and m["cpu_source"] == "rusage"
+        m = job_metrics(
+            job(
+                cpu_sec=3 * 3600.0,
+                mon_source="cgroup-v2",
+                mon_coverage=0.99,
+                mon_cpu_sec=4 * 3600.0,
+            ),
+            conf,
+        )
         assert m["cores_used"] == 4 and m["cpu_source"] == "profile"
 
     def test_partial_or_process_tree_profile_is_only_a_lower_bound(self, conf):

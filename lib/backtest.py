@@ -25,7 +25,7 @@ import dataclasses
 import statistics
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from lib import recommender
+from lib import config, recommender
 from lib.config import Config
 from lib.fmt import fmt_date, fmt_hours, fmt_int, fmt_pct, table
 from lib.history import History
@@ -116,11 +116,10 @@ def parse_settings(pairs: Sequence[str], cfg: Config) -> Config:
                 "--set takes KEY=VALUE with KEY one of: %s (got %r)"
                 % (", ".join(POLICY_KEYS), pair)
             )
-        current = getattr(cfg, key)
         try:
-            changes[key] = int(raw) if isinstance(current, int) else float(raw)
-        except ValueError:
-            raise ValueError("--set %s: %r is not a number" % (key, raw)) from None
+            changes[key] = config.convert(key, raw.strip(), isinstance(getattr(cfg, key), int))
+        except ValueError as exc:
+            raise ValueError("--set %s: %s" % (key, exc)) from None
     return dataclasses.replace(cfg, **changes)
 
 

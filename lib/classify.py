@@ -20,6 +20,7 @@ Session kinds are sized differently from batch work: they end when the user
 stops or when the limit cuts them off, so a timeout is not a failure.
 """
 
+import hashlib
 import os
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -32,14 +33,57 @@ _OOD_MARK = "sys/dashboard/"
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _DIGITS_RE = re.compile(r"\d+")
 _SEPARATORS = ("&&", "||", ";", "|", "&")
-_BRACKETS = frozenset("(){}")
 # What `hpg submit` puts in front of a --wrap command to start the in-job sampler.
 SAMPLER_MARK = "HPCSIZER=sampler"
 
+_SAMPLER_PREFIX = re.compile(r"\(\s*" + re.escape(SAMPLER_MARK) + r"\b.*?&\s*\)\s*;?\s*")
+# The temporary copy of a script that `hpg submit` hands to sbatch: <tmp>/hpg-XXXXXXXX/<name>
+_SCRIPT_COPY = re.compile(r"(?<!\S)\S*/hpg-[A-Za-z0-9_]{8}/(?=[^/\s])")
+
+
+def shown_command(submit_line: str) -> str:
+    """A stored submit line without what ``hpg submit`` added to it.
+
+    Accounting records the command as sbatch received it: with the line that
+    starts the sampler in front of a ``--wrap`` command, or with the path of
+    the temporary script copy. Neither is what the user typed.
+    """
+    return _SCRIPT_COPY.sub("", _SAMPLER_PREFIX.sub("", submit_line))
+
+
 # Launchers that only run something else; the program is what follows them.
 _PASS_THROUGH = frozenset(
-    "srun time nice nohup stdbuf exec command env timeout ionice taskset numactl xvfb-run".split()
+    "srun time nice nohup stdbuf exec command env timeout ionice taskset numactl xvfb-run "
+    "mpirun mpiexec mpiexec.hydra orterun".split()
 )
+# First words of a shell construct: what runs is the construct as a whole.
+_SHELL_KEYWORDS = frozenset("for while until if case select function [[ [ test !".split())
+# Options after which an interpreter takes code from the command line. That
+# code is the program; the interpreter and the option say nothing about it.
+_INLINE_CODE = {
+    "python": ("-c",),
+    "Rscript": ("-e",),
+    "perl": ("-e", "-E"),
+    "ruby": ("-e",),
+    "node": ("-e", "-p", "--eval", "--print"),
+    "julia": ("-e", "-E", "--eval", "--print"),
+    "matlab": ("-r", "-batch"),
+    "octave": ("--eval",),
+}
+# Options of an interpreter whose value is the next word, so that word is not the script.
+_INTERPRETER_VALUE_OPTIONS = {
+    "python": frozenset("-W -X -Q".split()),
+    "perl": frozenset("-I".split()),
+    "ruby": frozenset("-I -r".split()),
+    "node": frozenset("-r --require".split()),
+    "julia": frozenset("-t --threads -p --procs -J --sysimage -C --cpu-target -L --load".split()),
+    "java": frozenset("-cp -classpath --class-path -p --module-path".split()),
+    "matlab": frozenset("-logfile -sd".split()),
+    "snakemake": frozenset(
+        "-j --jobs -c --cores -s --snakefile --configfile -d --directory".split()
+    ),
+}
+_NOT_A_FILE_NAME = "-"  # second part of a signature that stands for code, not for a file
 # Shell housekeeping that precedes the real command in a wrapped line.
 _PRELUDE = frozenset(
     "module ml source . cd export set unset ulimit umask echo printf mkdir date hostname true :".split()
@@ -54,8 +98,12 @@ _SCRIPT_SUFFIXES = (".py", ".r", ".sh", ".jl", ".pl", ".m", ".nf", ".smk", ".rb"
 # Options of pass-through launchers and containers that consume the next token.
 _VALUE_OPTIONS = frozenset(
     "-n -N -c -t -p -A -q -J -w -x -B -H -W -G --bind --home --pwd --env --overlay "
-    "--ntasks --nodes --cpus-per-task --time --mem --partition --account --qos --gres".split()
+    "--ntasks --nodes --cpus-per-task --time --mem --partition --account --qos --gres "
+    "-np -ppn -host --host -hostfile --hostfile -machinefile --machinefile "
+    "--map-by --bind-to --rank-by -wdir --wdir".split()
 )
+_TWO_VALUE_OPTIONS = frozenset("--mca -mca --gmca -gmca".split())
+_DIGITS_TO_LETTERS = str.maketrans("0123456789", "ghijklmnop")
 
 
 def collapse_digits(text: str) -> str:
@@ -79,7 +127,8 @@ def _segments(tokens: Sequence[str]) -> List[List[str]]:
             continue
         trailing = tok.endswith(";") and len(tok) > 1
         word = tok.rstrip(";") if trailing else tok
-        if word and not set(word) <= _BRACKETS:  # "(", ")" and "{" group commands, nothing more
+        word = word.lstrip("({").rstrip(")}")  # "(python a.py)": a subshell or group, no more
+        if word:
             out[-1].append(word)
         if trailing:
             out.append([])
@@ -88,8 +137,51 @@ def _segments(tokens: Sequence[str]) -> List[List[str]]:
 
 def _skip_options(tokens: Sequence[str], i: int) -> int:
     while i < len(tokens) and tokens[i].startswith("-"):
-        i += 2 if tokens[i] in _VALUE_OPTIONS and "=" not in tokens[i] else 1
+        if tokens[i] in _TWO_VALUE_OPTIONS:
+            i += 3
+        else:
+            i += 2 if tokens[i] in _VALUE_OPTIONS and "=" not in tokens[i] else 1
     return i
+
+
+def _digest(tokens: Sequence[str]) -> str:
+    """Eight letters that stand for a command text; numbers in it do not matter.
+
+    Letters only, so that collapsing digits in a family name leaves it alone.
+    """
+    text = collapse_digits(" ".join(tokens))
+    hexdigest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    return hexdigest[:8].translate(_DIGITS_TO_LETTERS)
+
+
+def _interpreted(name: str, rest: Sequence[str]) -> str:
+    """Signature of ``<interpreter> rest...``: the script it runs, or a mark for inline code."""
+    inline = _INLINE_CODE.get(name, ())
+    takes_value = _INTERPRETER_VALUE_OPTIONS.get(name, ())
+    j, n = 0, len(rest)
+    while j < n:
+        arg = rest[j]
+        if arg == "-m" and name == "python" and j + 1 < n:
+            return "%s:%s" % (name, rest[j + 1])
+        if arg in inline:
+            return "%s:%s" % (name, arg)
+        if arg == "-jar" and j + 1 < n:
+            return "%s:%s" % (name, os.path.basename(rest[j + 1]))
+        if name == "nextflow" and arg == "run" and j + 1 < n:
+            return "%s:%s" % (name, os.path.basename(rest[j + 1]))
+        if name == "Rscript" and arg == "CMD" and j + 1 < n:
+            j += 2  # R CMD BATCH file.R
+            continue
+        if arg == "<" and j + 1 < n:
+            return "%s:%s" % (name, os.path.basename(rest[j + 1]))  # the script on standard input
+        if arg in (">", ">>", "2>", "&>") or arg in takes_value:
+            j += 2
+            continue
+        if arg.startswith(("-", ">", "2>", "&>")) or arg.isdigit():
+            j += 1
+            continue
+        return "%s:%s" % (name, os.path.basename(arg.lstrip("<")))
+    return name
 
 
 def _segment_signature(tokens: Sequence[str]) -> Optional[str]:
@@ -116,27 +208,20 @@ def _segment_signature(tokens: Sequence[str]) -> Optional[str]:
         if low in _SHELLS and i + 1 < n and tokens[i + 1] in ("-c", "-lc", "-ic", "-l"):
             i += 2
             continue
+        if low in _SHELL_KEYWORDS:
+            return "shell:" + _NOT_A_FILE_NAME
         match = _INTERPRETER_RE.match(low)
         if match or low in _SHELLS:
             name = "Rscript" if low in ("rscript", "r") else (match.group(1) if match else low)
-            j = i + 1
-            while j < n:
-                arg = tokens[j]
-                if arg == "-m" and j + 1 < n:
-                    return "%s:%s" % (name, tokens[j + 1])
-                if arg in ("-c", "-e", "-r", "-batch"):
-                    return "%s:%s" % (name, arg)
-                if arg == "-jar" and j + 1 < n:
-                    return "%s:%s" % (name, os.path.basename(tokens[j + 1]))
-                if name == "nextflow" and arg == "run" and j + 1 < n:
-                    return "%s:%s" % (name, os.path.basename(tokens[j + 1]))
-                if arg.startswith("-"):
-                    j += 1
-                    continue
-                return "%s:%s" % (name, os.path.basename(arg))
-            return name
+            return _interpreted(name, tokens[i + 1 :])
         return base
     return None
+
+
+def _is_code(signature: str) -> bool:
+    """Does the signature stand for code given on the command line rather than for a file?"""
+    parts = signature.split(":")
+    return len(parts) == 2 and parts[1].startswith("-")
 
 
 def _skip_options_conda(tokens: Sequence[str], i: int) -> int:
@@ -152,7 +237,8 @@ def command_signature(tokens: Sequence[str]) -> Optional[str]:
     never enter the signature: they are what varies between runs of one family.
     """
     fallback: Optional[str] = None
-    for seg in _segments(tokens):
+    segments = _segments(tokens)
+    for seg in segments:
         sig = _segment_signature(seg)
         if not sig:
             continue
@@ -162,6 +248,10 @@ def command_signature(tokens: Sequence[str]) -> Optional[str]:
         if program == "sleep":
             fallback = fallback or sig  # a real command may still follow
             continue
+        if _is_code(sig):
+            # python -c "...", Rscript -e "...", a for loop: the program is the
+            # text itself. The same text is the same program; another is not.
+            return "%s:%s" % (sig, _digest([tok for part in segments for tok in part]))
         return sig
     return fallback
 
@@ -173,21 +263,37 @@ def submit_signature(submit_line: Optional[str]) -> Optional[str]:
     tokens = sbatch_opts.strip_sbatch_word(submit_line.split())
     if not tokens:
         return None
-    for index, tok in enumerate(tokens):
+    index = _wrap_index(tokens)
+    if index is not None:
+        tok = tokens[index]
         if tok == "--wrap":
             return command_signature(tokens[index + 1 :])
-        if tok.startswith("--wrap="):
-            return command_signature([tok[len("--wrap=") :]] + list(tokens[index + 1 :]))
+        return command_signature([tok[len("--wrap=") :]] + list(tokens[index + 1 :]))
     parsed = sbatch_opts.parse_argv(tokens)
     if parsed.script:
         return os.path.basename(_clean(parsed.script))
     return None
 
 
+def _wrap_index(tokens: Sequence[str]) -> Optional[int]:
+    """Position of sbatch's ``--wrap`` in a stored submit line, or None.
+
+    Accounting keeps no quotes, so everything after ``--wrap`` is the wrapped
+    command. A ``--wrap`` that comes after the script is an argument of the
+    script, not an option of sbatch.
+    """
+    for index, tok in enumerate(tokens):
+        if tok == "--wrap" or tok.startswith("--wrap="):
+            if sbatch_opts.parse_argv(list(tokens[:index])).script is not None:
+                return None
+            return index
+    return None
+
+
 def is_wrap(submit_line: Optional[str]) -> bool:
-    return bool(submit_line) and any(
-        tok == "--wrap" or tok.startswith("--wrap=") for tok in submit_line.split()
-    )
+    if not submit_line:
+        return False
+    return _wrap_index(sbatch_opts.strip_sbatch_word(submit_line.split())) is not None
 
 
 def job_kind(job: Mapping[str, Any], cfg: Config) -> str:

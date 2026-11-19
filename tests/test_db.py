@@ -189,6 +189,83 @@ class TestReadOnly:
             db.connect_ro(dbfile)
 
 
+class TestWhoMayReadTheDatabase:
+    """The directory decides who can read what is published in it; the file follows."""
+
+    @pytest.mark.parametrize(
+        "directory, expected",
+        [(0o2750, "0o640"), (0o750, "0o640"), (0o755, "0o644"), (0o700, "0o600"), (0o711, "0o644")],
+    )
+    def test_published_file_follows_its_directory(self, tmp_path, directory, expected):
+        folder = tmp_path / "store"
+        folder.mkdir()
+        folder.chmod(directory)
+        path = str(folder / "profiles.db")
+        before = os.umask(0o022)
+        try:
+            write_jobs(path, make_job(1))
+            assert oct(os.stat(path).st_mode & 0o777) == expected
+            write_jobs(path, make_job(2))
+            assert oct(os.stat(path).st_mode & 0o777) == expected, "also when replacing it"
+        finally:
+            os.umask(before)
+            folder.chmod(0o755)
+
+    def test_umask_does_not_matter(self, tmp_path):
+        folder = tmp_path / "store"
+        folder.mkdir()
+        folder.chmod(0o750)
+        before = os.umask(0o077)
+        try:
+            write_jobs(str(folder / "profiles.db"), make_job(1))
+        finally:
+            os.umask(before)
+        assert oct(os.stat(str(folder / "profiles.db")).st_mode & 0o777) == "0o640"
+
+
+class TestColumnsAddedLater:
+    """A database written by the first release lacks columns that were added since."""
+
+    def older(self, path):
+        os.makedirs(os.path.dirname(path))
+        conn = sqlite3.connect(path)
+        conn.executescript(db.SCHEMA)
+        conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '3')")
+        conn.execute(
+            "INSERT INTO harvest_runs(started_ts, finished_ts, n_records, n_updated) "
+            "VALUES (1, 2, 651, 649)"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_the_next_writer_adds_them_and_keeps_the_rows(self, dbfile):
+        self.older(dbfile)
+        with db.reader(dbfile) as conn:
+            last = db.last_harvest(conn)
+            assert last["n_updated"] == 649 and last.get("n_unchanged") is None
+        with db.SnapshotWriter(dbfile) as conn:
+            db.insert_harvest_run(
+                conn,
+                {"started_ts": 3, "finished_ts": 4, "deep": 0, "n_records": 5, "n_unchanged": 5},
+            )
+        with db.reader(dbfile) as conn:
+            assert db.last_harvest(conn)["n_unchanged"] == 5
+            rows = conn.execute("SELECT n_records, n_unchanged FROM harvest_runs ORDER BY id")
+            assert [tuple(r) for r in rows] == [(651, None), (5, 5)]
+
+    def test_code_of_the_first_release_still_reads_and_writes_it(self, dbfile):
+        """Somebody may run an older checkout against the same database."""
+        with db.SnapshotWriter(dbfile, allow_create=True) as conn:
+            first_release = [c for c in db.HARVEST_COLUMNS if c != "n_unchanged"]
+            conn.execute(
+                "INSERT INTO harvest_runs (%s) VALUES (%s)"
+                % (", ".join(first_release), ", ".join("?" * len(first_release))),
+                [1] * len(first_release),
+            )
+        with db.reader(dbfile) as conn:
+            assert db.last_harvest(conn)["n_unchanged"] is None
+
+
 class TestUpsert:
     def test_update_keeps_first_seen_and_replaces_steps(self, dbfile):
         job, steps = make_job(5, state="COMPLETED")
@@ -225,7 +302,27 @@ class TestUpsert:
             assert [j["job_name"] for j in found] == ["autumn", "spring"]
 
     def test_same_job_twice_is_one_row(self, dbfile):
-        assert write_jobs(dbfile, make_job(8), make_job(8)) == ["inserted", "updated"]
+        assert write_jobs(dbfile, make_job(8), make_job(8)) == ["inserted", "unchanged"]
+
+    def test_row_read_again_as_it_is_stored_is_left_alone(self, dbfile):
+        job, steps = make_job(8)
+        write_jobs(dbfile, (job, steps), now=1000)
+        assert write_jobs(dbfile, (dict(job), [dict(s) for s in steps]), now=2000) == ["unchanged"]
+        with db.reader(dbfile) as conn:
+            (row,) = db.fetch_jobs(conn)
+            assert row["updated_ts"] == 1000, "the time its content last changed"
+
+    def test_a_change_in_one_step_is_a_change(self, dbfile):
+        job, steps = make_job(8)
+        write_jobs(dbfile, (job, steps), now=1000)
+        later = [dict(s) for s in steps]
+        later[0]["max_rss_bytes"] = (later[0]["max_rss_bytes"] or 0) + 4096
+        assert write_jobs(dbfile, (job, later), now=2000) == ["updated"]
+        assert write_jobs(dbfile, (job, later[:1]), now=3000) == ["updated"], "a step is gone"
+        assert write_jobs(dbfile, (job, list(reversed(later[:1]))), now=4000) == ["unchanged"]
+        with db.reader(dbfile) as conn:
+            (row,) = db.fetch_jobs(conn)
+            assert row["updated_ts"] == 3000 and len(db.fetch_steps(conn, row["id"])) == 1
 
     def test_job_without_identity_is_rejected(self, dbfile):
         job, steps = make_job(9)

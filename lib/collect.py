@@ -193,6 +193,7 @@ def harvest(
         "n_records": 0,
         "n_inserted": 0,
         "n_updated": 0,
+        "n_unchanged": 0,
         "n_open": 0,
         "n_internal": 0,
         "n_unparsed": 0,
@@ -281,6 +282,7 @@ def harvest(
         stats["n_records"] = len(outcome)
         stats["n_inserted"] = outcome.count("inserted")
         stats["n_updated"] = outcome.count("updated")
+        stats["n_unchanged"] = outcome.count("unchanged")
         stats["n_open"] = outcome.count("open")
         stats["n_internal"] = outcome.count("internal")
         stats["n_unparsed"] += outcome.count("unparsed")
@@ -295,7 +297,7 @@ def harvest(
         db.insert_harvest_run(conn, stats)
 
     log(
-        "[harvest] %s: %d records since %s -> %d new, %d updated, %d still open, "
+        "[harvest] %s: %d records since %s -> %d new, %d changed, %d unchanged, %d still open, "
         "%d internal, %d unparsed, %d late, %d user(s)%s%s"
         % (
             time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
@@ -303,6 +305,7 @@ def harvest(
             slurm.utc_stamp(start) + "Z",
             stats["n_inserted"],
             stats["n_updated"],
+            stats["n_unchanged"],
             stats["n_open"],
             stats["n_internal"],
             stats["n_unparsed"],

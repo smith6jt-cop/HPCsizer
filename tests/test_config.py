@@ -3,9 +3,11 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.config import load_config  # noqa: E402
+from lib.config import ConfigError, load_config  # noqa: E402
 
 
 def test_defaults_are_relative_to_the_root(tmp_path):
@@ -72,3 +74,50 @@ def test_data_roots_and_model_settings(tmp_path):
     cfg = load_config({"HPCSIZER_ROOT": str(tmp_path)})
     assert cfg.data_roots == ["/data", "/scratch/local"]
     assert cfg.model_min_points == 6 and cfg.model_min_r2 == 0.8
+
+
+class TestValuesThatMakeNoSense:
+    """A value outside what the code can work with is not used; the default is, and it is said."""
+
+    def load(self, tmp_path, text):
+        (tmp_path / "hpcsizer.ini").write_text(text)
+        return load_config({"HPCSIZER_ROOT": str(tmp_path)})
+
+    @pytest.mark.parametrize(
+        "section, key, raw",
+        [
+            ("policy", "last_n", "0"),
+            ("policy", "min_runs", "0"),
+            ("policy", "min_runs_pooled", "-2"),
+            ("policy", "lookback_days", "0"),
+            ("policy", "mem_headroom", "0.5"),
+            ("policy", "cpu_headroom", "nan"),
+            ("policy", "time_headroom", "inf"),
+            ("policy", "time_percentile", "7"),
+            ("policy", "time_percentile", "0"),
+            ("policy", "model_min_r2", "1.5"),
+            ("policy", "last_n", "many"),
+            ("measurement", "acct_sample_sec", "0"),
+            ("collector", "slice_days", "0"),
+            ("collector", "stale_hours", "-1"),
+            ("collector", "retries", "0"),
+        ],
+    )
+    def test_default_is_kept_and_the_problem_is_named(self, tmp_path, section, key, raw):
+        default = getattr(load_config({"HPCSIZER_ROOT": str(tmp_path)}), key)
+        cfg = self.load(tmp_path, "[%s]\n%s = %s\n" % (section, key, raw))
+        assert getattr(cfg, key) == default
+        assert len(cfg.problems) == 1 and key in cfg.problems[0] and raw in cfg.problems[0]
+
+    def test_sensible_values_are_taken(self, tmp_path):
+        cfg = self.load(
+            tmp_path,
+            "[policy]\nlast_n = 5\nmem_headroom = 1.5\ntime_percentile = 1\n"
+            "[collector]\noverlap_days = 0\nretry_delay = 0\n",
+        )
+        assert (cfg.last_n, cfg.mem_headroom, cfg.time_percentile) == (5, 1.5, 1.0)
+        assert cfg.overlap_days == 0 and cfg.problems == []
+
+    def test_a_file_that_is_not_an_ini_file(self, tmp_path):
+        with pytest.raises(ConfigError, match="hpcsizer.ini"):
+            self.load(tmp_path, "this is not an ini file\n[[[\n")

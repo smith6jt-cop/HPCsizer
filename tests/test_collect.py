@@ -220,8 +220,19 @@ class TestNothingIsLost:
         stubs.sacct_default(simple_job(1) + simple_job(2))
         first = run(cfg)
         second = run(cfg, now=NOW + 60)
-        assert (first["n_inserted"], second["n_inserted"], second["n_updated"]) == (2, 0, 2)
+        assert (first["n_inserted"], second["n_inserted"]) == (2, 0)
+        assert (second["n_updated"], second["n_unchanged"]) == (0, 2)
         assert len(stored(cfg)) == 2
+
+    def test_summary_tells_what_changed_from_what_was_only_read_again(self, cfg, stubs):
+        """Every harvest reads three days again; that is not the same as jobs changing."""
+        stubs.sacct_default(simple_job(1) + simple_job(2, state="TIMEOUT"))
+        run(cfg)
+        stubs.sacct_default(simple_job(1) + simple_job(2, state="FAILED") + simple_job(3))
+        messages = []
+        stats = collect.harvest(cfg, now=NOW + 60, log=messages.append)
+        assert (stats["n_inserted"], stats["n_updated"], stats["n_unchanged"]) == (1, 1, 1)
+        assert "-> 1 new, 1 changed, 1 unchanged, 0 still open" in messages[-1]
 
     def test_a_clock_that_ran_ahead_does_not_open_a_gap(self, cfg, stubs):
         stubs.sacct_default(simple_job(1))

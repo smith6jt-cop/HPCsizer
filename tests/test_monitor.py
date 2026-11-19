@@ -151,7 +151,9 @@ class TestProcessTree:
             tree = sampler.ProcessTree(os.getpid(), "/proc")
             assert child.pid in tree.members() and os.getpid() in tree.members()
             data = tree.sample()
-            assert data["mem"] > 60 * MIB and data["nproc"] >= 2
+            assert data["mem"] > 60 * MIB and data["nproc"] >= 1
+            both = sampler.describe_processes("/proc", [os.getpid(), child.pid])
+            assert both["nproc"] == 2 and data["nproc"] == 1, "the sampler does not count itself"
             first = data["cpu"]
             sum(range(2_000_000))
             assert tree.sample()["cpu"] >= first
@@ -162,8 +164,12 @@ class TestProcessTree:
     def test_cpu_time_of_finished_children_is_kept(self):
         tree = sampler.ProcessTree(os.getpid(), "/proc")
         before = tree.sample()["cpu"]
-        subprocess.run([sys.executable, "-c", "sum(range(6_000_000))"], check=True)
-        assert tree.sample()["cpu"] > before + 0.05, "a reaped child's time stays with its parent"
+        # The child burns a fixed amount of CPU time, not a fixed amount of work:
+        # on a fast machine six million additions take about the 0.05 s this
+        # test used to ask for, and it failed there once in a while.
+        burn = "import time\nt = time.process_time()\nwhile time.process_time() - t < 0.5: pass"
+        subprocess.run([sys.executable, "-c", burn], check=True)
+        assert tree.sample()["cpu"] > before + 0.3, "a reaped child's time stays with its parent"
 
     def test_command_names_with_spaces_and_parentheses(self, tmp_path):
         proc = tmp_path / "proc"
@@ -316,6 +322,29 @@ class TestAsAProcess:
         ast.parse(SAMPLER.read_text(), feature_version=(3, 6))
 
 
+class TestWhoseProcesses:
+    """A job's cgroup also holds the sampler and Slurm's step daemons; they are not the job's."""
+
+    def test_sampler_and_slurm_daemons_are_not_listed_or_counted(self, tmp_path):
+        proc = tmp_path / "proc"
+        fake_process(proc, 10, rss_kb=7 * 1024, name="slurmstepd", rchar=10**6)
+        fake_process(proc, 11, rss_kb=7 * 1024, name="slurmstepd", rchar=10**6)
+        fake_process(proc, 20, rss_kb=16 * 1024, name="python3", threads=1, rchar=10**7)  # sampler
+        fake_process(proc, 30, rss_kb=3 * 1024, name="slurm_script", threads=1, rchar=2000)
+        fake_process(proc, 31, rss_kb=700, name="sleep", threads=1, rchar=1000)
+        data = sampler.describe_processes(str(proc), [10, 11, 20, 30, 31], own_pid=20)
+        assert data["top"] == "slurm_script:3,sleep:1"
+        assert (data["nproc"], data["threads"], data["rd"]) == (2, 2, 3000)
+        assert data["rss_sum"] == (3 * 1024 + 700) * 1024
+
+    def test_job_that_runs_python_keeps_its_own_python(self, tmp_path):
+        proc = tmp_path / "proc"
+        fake_process(proc, 20, rss_kb=16 * 1024, name="python3")  # the sampler
+        fake_process(proc, 40, rss_kb=900 * 1024, name="python3")  # the job
+        data = sampler.describe_processes(str(proc), [20, 40], own_pid=20)
+        assert data["top"] == "python3:900" and data["nproc"] == 1
+
+
 class TestSeriesFile:
     """The spool is writable by the whole group: the name a job would use may be taken."""
 
@@ -418,6 +447,42 @@ class TestSeriesFile:
 
 
 class TestSeveralNodes:
+    def once(self, tmp_path, monkeypatch, *flags):
+        """Run the sampler for one sample inside a pretend two-node job; True if it fanned out."""
+        called = []
+        tmp_path.mkdir()
+        monkeypatch.setattr(sampler, "fan_out", lambda args, environ: called.append(1) and None)
+        monkeypatch.setattr(sampler, "_stop", [signal.SIGTERM])
+        args = sampler.build_parser().parse_args(
+            [
+                "--spool",
+                str(tmp_path),
+                "--job",
+                "5",
+                "--pid",
+                str(os.getpid()),
+                "--no-node-counters",
+            ]
+            + list(flags)
+        )
+        environ = {"SLURM_JOB_NUM_NODES": "2", "SLURMD_NODENAME": "c1"}
+        assert sampler.run(args, environ) == 0 and (tmp_path / "5.c1.tsv").exists()
+        return bool(called)
+
+    def test_other_nodes_are_sampled_unless_turned_off(self, tmp_path, monkeypatch):
+        assert self.once(tmp_path / "a", monkeypatch) is True
+        assert self.once(tmp_path / "b", monkeypatch, "--no-fan-out") is False
+        assert self.once(tmp_path / "c", monkeypatch, "--fan-out") is True, "still accepted"
+
+    def test_sampler_on_another_node_needs_the_jobs_cgroup(self, tmp_path):
+        """Started there through srun it has no process tree of the job to follow."""
+        args = sampler.build_parser().parse_args(
+            ["--spool", str(tmp_path), "--job", "5", "--no-fan-out", "--skip-node", "c1",
+             "--cgroup-root", str(tmp_path / "no-cgroups")]
+        )  # fmt: skip
+        assert sampler.run(args, {"SLURMD_NODENAME": "c2"}) == 0
+        assert list(tmp_path.iterdir()) == []
+
     def test_sampler_on_the_batch_node_starts_one_on_each_other_node(self, tmp_path, monkeypatch):
         calls = tmp_path / "srun.calls"
         fake = tmp_path / "bin" / "srun"
@@ -428,7 +493,9 @@ class TestSeveralNodes:
         child = sampler.fan_out(args, {"SLURM_JOB_NUM_NODES": "3", "SLURMD_NODENAME": "c1"})
         assert child is not None and child.wait(timeout=10) == 0
         call = calls.read_text()
-        assert call.startswith("--overlap --nodes=3 --ntasks=3 --ntasks-per-node=1 --quiet ")
+        assert call.startswith(
+            "--overlap --mem=0 --nodes=3 --ntasks=3 --ntasks-per-node=1 --quiet "
+        )
         assert "monitor.py --spool /sp --no-fan-out --skip-node c1 --interval 5.0" in call
 
     def test_single_node_jobs_start_nothing(self):

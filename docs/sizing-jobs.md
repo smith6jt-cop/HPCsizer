@@ -62,6 +62,14 @@ A name that says nothing about the job — `wrap` (what Slurm calls every
 the job is identified by its program instead: two `--wrap` jobs running
 different programs are different families, and arguments never matter.
 
+The program is the script an interpreter runs (`python:seg.py`,
+`Rscript:fit.R`) or the executable itself; launchers such as `srun`, `mpirun`
+and `conda run` are looked through. Where the command line carries the code
+itself — `python -c "..."`, `Rscript -e "..."`, `matlab -batch "..."`, a `for`
+loop — that text is the program: the same text, apart from the numbers in it,
+is one family, shown with a short code such as `python:-c:cpkmnidm`, and a
+different text is a different family.
+
 Other people's batch jobs are never used: a job called `align` is different
 work for different people.
 
@@ -109,16 +117,21 @@ no memory figure is given.
 
 `--mem` is always treated as the total of the job. If you write
 `--mem-per-cpu`, the suggestion is given in that form, recomputed for the
-suggested CPU count.
+suggested CPU count and rounded up in steps of 128 MB (64 MB below 512 MB); a
+share that is kept is written exactly as you wrote it.
 
 ### CPUs
 
 - Only ever **lowered**: to the highest number of cores a run kept busy on
-  average, times 1.25, rounded up.
+  average, times 1.25, rounded up. Only runs that ended normally, or ran until
+  their time limit, count: a run that crashed or was cancelled may never have
+  got past its start-up.
 - Not lowered when that run used (nearly) all the cores it had — four busy
   cores out of four say the job can use at least four, not that sixteen would
   be too many.
-- Not changed for jobs with more than one task or node.
+- Not changed for jobs with more than one task or node, nor for a job that has
+  not run yet when neither its command line nor an earlier run of its family
+  with the same CPU total says how its CPUs are divided into tasks.
 - When the CPU count is lowered, memory is always stated as a total, so that a
   per-CPU request or a per-CPU cluster default does not shrink with it.
 
@@ -137,8 +150,14 @@ which record how many cores were busy for 95% of the samples.
 - Not above the longest limit under which runs completed, when none timed out.
 - **Not shortened in the same suggestion that lowers the CPU count** — fewer
   cores can make the run longer. The report says what history alone would
-  suggest; apply it once the job has run with its new CPU count.
-- For sessions, ending at the limit is normal. Their limit is never raised.
+  suggest; apply it once the job has run with its new CPU count. For the same
+  reason it is not shortened while the request asks for fewer cores than every
+  run it would be judged from.
+- For sessions, ending at the limit is normal. Their limit is never raised,
+  and never lowered to a limit that cut earlier sessions off: such a limit is
+  not known to be enough.
+- A raise is not checked against what the partition allows; if the suggested
+  limit is above the partition's, use the partition's.
 
 ### GPUs
 
@@ -156,10 +175,16 @@ Your `#SBATCH` lines stay as they are; the command line overrides them. Nothing
 is applied when
 
 - the figures do not come from the job's own history (see "No history" below),
+  or come from other members' sessions,
 - the job has more than one task or node, or is a heterogeneous job,
 - the request is `--mem=0` (the whole node),
 - an sbatch option is used that `hpg` does not know — the job is then
   submitted exactly as given.
+
+A value your submission does not state at all is shown as the last run's,
+marked `(last run)`. sbatch does not know the last run: left alone, the job
+would get the cluster's default. With `--apply` such a value is therefore
+passed on even where the table says `keep`.
 
 `hpg submit` without `--apply` only reports. It never prompts unless you asked
 for `--apply` at a terminal.
@@ -188,6 +213,10 @@ Pending jobs that ask for less than their family needed:
 
 The `scontrol update` lines are printed for you to review and run; `hpg` does
 not run them.
+
+The list comes from Slurm's accounting, which reports a pending job once it is
+eligible to run: jobs that are held, deferred with `--begin` or waiting on a
+dependency do not appear until then.
 
 ## Profiles: what the job really did
 
@@ -224,6 +253,12 @@ a small program in the background that ends with your script; it cannot change
 your job's exit status, and nothing runs when the job ends. `--no-profile`
 leaves it out. Scripts that are not run by `sh` or `bash` are submitted
 unprofiled, with a note.
+
+Because the job runs from that temporary copy, `scontrol show job` reports the
+copy's path as the job's `Command`, and the copy is gone once the job has been
+submitted. A script that reads its own location from that field is therefore
+submitted unprofiled, with a note; use `$SLURM_SUBMIT_DIR` in such a script to
+have it profiled.
 
 ```bash
 hpg plot 51000040
@@ -296,5 +331,18 @@ killed before Slurm recorded its CPU time. Submit with `hpg submit` once and
 the profile fills it in.
 
 **Can I see someone else's jobs?** Yes: `--user NAME` on `recommend`, `report`,
-`history`, `flags`, `families`, `export` and `queue`. Everything stored comes
-from Slurm's accounting, which members of an account can already query.
+`history`, `flags`, `families`, `export` and `queue`. See the next question for
+what there is to see.
+
+**What is recorded about my jobs, and who can read it?** For every job of the
+account: what Slurm's accounting holds, which members of the account can query
+anyway — job name, command line, working directory, state, times, requests and
+measured use. For a job submitted with `hpg submit`, in addition: the directory
+it was submitted from, the paths and sizes of the input files named in the
+script, a checksum of the script (not its text), the tools it was recognised to
+use, what was suggested and what was applied; and from inside the job, every
+few seconds, its memory, CPU, I/O and GPU use and the names of its largest
+processes. Everybody who can read the checkout — the group — can read all of
+it; nobody else can, as long as the directory is closed to others (`hpg status`
+says so when it is not). `--no-profile` leaves out what is recorded inside the
+job.

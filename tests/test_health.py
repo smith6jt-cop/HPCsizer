@@ -167,3 +167,38 @@ class TestCodePermissions:
         os.makedirs(cfg.spool_dir)
         st = health.status(cfg, with_sacct=False)
         assert any("writable by others" in problem for problem in st["problems"])
+
+
+class TestWhoCanReadTheDatabase:
+    """Job names, command lines and working directories of every member are in it."""
+
+    def test_open_all_the_way_up_is_called_out(self, cfg, stubs, tmp_path):
+        harvest(cfg)
+        os.chmod(cfg.root, 0o755)
+        assert health.readable_by_others(cfg, top=str(tmp_path)) is True
+        report = health.status(cfg, now=NOW, with_sacct=False)
+        text = " ".join(report["problems"])
+        assert ("can be read by every user" in text) == health.readable_by_others(cfg)
+
+    def test_a_directory_others_cannot_enter(self, cfg, stubs, tmp_path):
+        os.chmod(cfg.root, 0o750)
+        try:
+            harvest(cfg)
+            assert health.readable_by_others(cfg, top=str(tmp_path)) is False
+        finally:
+            os.chmod(cfg.root, 0o755)
+
+    def test_a_closed_directory_further_up_is_enough(self, cfg, stubs, tmp_path):
+        harvest(cfg)
+        os.chmod(cfg.root, 0o755)
+        outer = os.path.dirname(cfg.root)
+        os.chmod(outer, 0o700)
+        try:
+            assert health.readable_by_others(cfg, top=os.path.dirname(outer)) is False
+        finally:
+            os.chmod(outer, 0o755)
+
+    def test_preflight_has_a_line_for_it(self, cfg, stubs):
+        harvest(cfg)
+        checks = {c["check"]: c for c in health.preflight(cfg, now=NOW)}
+        assert checks["database privacy"]["status"] in ("PASS", "WARN")

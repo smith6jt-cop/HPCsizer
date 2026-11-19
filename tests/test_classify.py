@@ -8,6 +8,7 @@ from lib.classify import (
     command_signature,
     is_session_kind,
     job_kind,
+    shown_command,
     submit_signature,
 )
 from lib.config import load_config
@@ -62,6 +63,75 @@ class TestSignature:
     def test_collapse_digits(self):
         assert collapse_digits("mplx12k-spleen") == "mplx#k-spleen"
         assert collapse_digits("v3-dg") == collapse_digits("v14-dg") == "v#-dg"
+
+
+class TestProgramsThatAreNotAFileName:
+    """Different programs of one user must not share a family: one would be sized from the other."""
+
+    def wrap(self, command):
+        return submit_signature("sbatch --wrap " + command)
+
+    @pytest.mark.parametrize(
+        "one, other",
+        [
+            ("python -c import a; a.run(1)", "python -c import b; b.train()"),
+            ("python -c import numpy as np; small()", "python -c import numpy as np; huge()"),
+            ("Rscript -e rmarkdown::render('a.Rmd')", "Rscript -e source('fit.R')"),
+            ("matlab -nodisplay -batch run_a", "matlab -nodisplay -batch run_b"),
+            ("matlab -r segment_all; exit", "matlab -r stitch; exit"),
+            ("perl -e print 1", "perl -e print 2 if 0"),
+            ("julia -e using A; A.go()", "julia -e using B; B.go()"),
+            (
+                "for f in *.tif; do python seg.py $f; done",
+                "for f in *.csv; do Rscript fit.R $f; done",
+            ),
+            (
+                "while read s; do ./align $s; done < samples.txt",
+                "while read s; do ./sort $s; done < s.txt",
+            ),
+            ("if [ -f x ]; then ./a; fi", "if [ -f y ]; then ./b; fi"),
+        ],
+    )
+    def test_inline_code_and_shell_constructs_are_told_apart(self, one, other):
+        a, b = self.wrap(one), self.wrap(other)
+        assert a and b and a != b
+        assert self.wrap(one) == a, "the same command is the same program"
+
+    def test_the_same_one_liner_with_another_number_is_one_family(self, conf):
+        a = classify(job(job_name="wrap", submit_line="sbatch --wrap python -c run(12, 3)"), conf)
+        b = classify(
+            job(job_name="wrap", submit_line="sbatch --mem=8G --wrap python -c run(13, 4)"), conf
+        )
+        c = classify(job(job_name="wrap", submit_line="sbatch --wrap python -c other(12)"), conf)
+        assert a["family"] == b["family"] != c["family"]
+        assert a["family"].startswith("smith6jt/wrap/cmd:python:-c:")
+
+    @pytest.mark.parametrize(
+        "command, expected",
+        [
+            ("R CMD BATCH --no-save fit.R out.txt", "Rscript:fit.R"),
+            ("R --no-save < fit.R", "Rscript:fit.R"),
+            ("python -W ignore a.py", "python:a.py"),
+            ("python -X dev -u b.py --n 3", "python:b.py"),
+            ("java -cp lib.jar Main in.txt", "java:Main"),
+            ("julia -t 4 sim.jl", "julia:sim.jl"),
+            ("mpirun -np 4 ./solver in.dat", "solver"),
+            ("mpiexec --mca btl self -n 2 ./a.out", "a.out"),
+            ("mpirun -n 8 python sim.py", "python:sim.py"),
+            ("(python a.py)", "python:a.py"),
+            ("( cd /x && python a.py )", "python:a.py"),
+            ("{ module load R; Rscript fit.R; }", "Rscript:fit.R"),
+            ("python tool --input data.py", "python:tool"),
+        ],
+    )
+    def test_the_program_is_not_an_option_value_or_a_launcher(self, command, expected):
+        assert self.wrap(command) == expected
+
+    def test_wrap_as_an_argument_of_a_script_is_not_a_wrap_job(self, conf):
+        c = classify(job(job_name="run.sh", submit_line="sbatch -c 2 run.sh --wrap tight"), conf)
+        assert c["kind"] == "batch" and c["signature"] == "run.sh"
+        w = classify(job(job_name="wrap", submit_line="sbatch -c 2 --wrap run.sh --wrap"), conf)
+        assert w["kind"] == "wrap"
 
 
 class TestKind:
@@ -141,3 +211,42 @@ class TestFamily:
         a = classify(job(user="a", job_name="align"), conf)
         b = classify(job(user="b", job_name="align"), conf)
         assert a["family"] != b["family"]
+
+
+class TestShownCommand:
+    """What 'hpg job' prints as the command: what was typed, not what hpg submit made of it."""
+
+    SAMPLER = (
+        "( HPCSIZER=sampler exec python3 -S /blue/mygroup/hpc-sizer/bin/monitor.py "
+        "--spool /blue/mygroup/hpc-sizer/spool --pid $$ </dev/null >/dev/null 2>&1 & )"
+    )
+
+    def test_sampler_line_in_front_of_a_wrapped_command(self):
+        line = "sbatch --parsable --wrap %s; sleep 150" % self.SAMPLER
+        assert shown_command(line) == "sbatch --parsable --wrap sleep 150"
+        line = "sbatch --wrap=%s; python a.py && echo done" % self.SAMPLER
+        assert shown_command(line) == "sbatch --wrap=python a.py && echo done"
+
+    def test_temporary_copy_of_a_script(self):
+        line = "sbatch --mem=4G /tmp/hpg-ab12_d3x/run_mplx.sh 45 /blue/lab/data"
+        assert shown_command(line) == "sbatch --mem=4G run_mplx.sh 45 /blue/lab/data"
+        line = "sbatch /scratch/local/1234/hpg-zzzzzzzz/job.sh"
+        assert shown_command(line) == "sbatch job.sh"
+
+    def test_everything_else_is_left_as_it_is(self):
+        for line in (
+            "sbatch run_mplx.sh 45",
+            "sbatch /home/alice/hpg-notes/run.sh",
+            "sbatch --wrap ( cd /tmp && ls ); echo HPCSIZER",
+            "srun --pty bash",
+            "",
+        ):
+            assert shown_command(line) == line
+
+    def test_family_and_shown_command_agree(self, conf):
+        job = {
+            "user": "alice",
+            "job_name": "wrap",
+            "submit_line": "sbatch --wrap %s; python fit.py --n 3" % self.SAMPLER,
+        }
+        assert classify(job, conf)["name_key"] == "cmd:python:fit.py"

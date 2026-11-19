@@ -34,6 +34,18 @@ def rec_for(conf, rows, target=None, **kwargs):
     return R.recommend(target or named(conf), hist(conf, rows), conf, NOW, **kwargs)
 
 
+class TestSettingsThatMakeNoSense:
+    """The configuration refuses these; the sizing code must not crash on them either."""
+
+    @pytest.mark.parametrize("setting", [{"last_n": 0}, {"min_runs": 0}, {"min_runs_pooled": 0}])
+    def test_no_runs_is_no_evidence(self, conf, setting):
+        for key, value in setting.items():
+            setattr(conf, key, value)
+        rec = rec_for(conf, [run(i) for i in range(5)])
+        assert rec["source"] in (R.SOURCE_NONE, R.SOURCE_HISTORY)
+        assert rec_for(conf, [], named(conf, name="never-ran"))["source"] == R.SOURCE_NONE
+
+
 class TestEvidenceLevels:
     def test_exact_name_is_preferred(self, conf):
         rows = [run(i) for i in range(3)]
@@ -257,8 +269,8 @@ class TestCpus:
         cpus = rec_for(conf, rows, target)["cpus"]
         assert cpus["action"] == "keep" and any("hpg submit" in note for note in cpus["notes"])
 
-    def test_sessions_are_cut_from_a_profile(self, conf):
-        rows = [
+    def session_rows(self, **profile):
+        return [
             run(
                 i,
                 job_name="vscode",
@@ -266,13 +278,48 @@ class TestCpus:
                 mon_p95_cores=2.2,
                 mon_max_cores=15.0,
                 mon_n_samples=900,
+                **profile,
             )
             for i in range(6)
         ]
+
+    def test_sessions_are_cut_from_a_profile(self, conf):
+        rows = self.session_rows(mon_source="cgroup-v2", mon_coverage=0.99)
         target = R.target_from_kind("vscode", "alice", conf, Request(cpus_per_task=16))
         rec = rec_for(conf, rows, target)
         assert rec["cpus"]["suggested"] == 3 and rec["cpus"]["peak"] == 15.0
         assert rec["evidence"]["profiled"] == 6
+
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            {"mon_source": "proc", "mon_coverage": 1.0},  # the batch shell's tree, not srun's
+            {"mon_source": "cgroup-v2", "mon_coverage": 0.5},  # half the run, or 1 of 2 nodes
+            {},
+        ],
+    )
+    def test_a_profile_that_saw_part_of_the_job_cuts_nothing(self, conf, profile):
+        rows = self.session_rows(**profile)
+        target = R.target_from_kind("vscode", "alice", conf, Request(cpus_per_task=16))
+        cpus = rec_for(conf, rows, target)["cpus"]
+        assert cpus["action"] == "keep" and cpus["suggested"] == 16
+
+    def test_batch_job_whose_profile_missed_the_work_is_sized_from_accounting(self, conf):
+        """Without a cgroup the sampler follows the batch shell and sees an idle srun."""
+        rows = [
+            run(i, cpu_sec=6 * 3600.0, mon_source="proc", mon_coverage=1.0, mon_p95_cores=0.01)
+            for i in range(5)
+        ]
+        cpus = rec_for(conf, rows, named(conf, cpus_per_task=16))["cpus"]
+        assert cpus["suggested"] == 8 and "average cores in use" in cpus["basis"]
+
+    def test_sustained_cores_never_undercut_the_average(self, conf):
+        rows = [
+            run(i, cpu_sec=6 * 3600.0, mon_source="cgroup-v2", mon_coverage=1.0, mon_p95_cores=2.0)
+            for i in range(5)
+        ]
+        cpus = rec_for(conf, rows, named(conf, cpus_per_task=16))["cpus"]
+        assert cpus["suggested"] == 8, "6 cores on average x 1.25, not 2 x 1.25"
 
     def test_multi_task_jobs_are_not_resized(self, conf):
         rows = [run(i) for i in range(5)]
@@ -287,16 +334,173 @@ class TestCpus:
         assert rec["cpus"]["action"] == "keep"
 
 
+class TestWhatASuggestionMayRestOn:
+    """Findings of the review of the sizing rules."""
+
+    def test_cpus_are_not_lowered_from_runs_that_crashed(self, conf):
+        """Three start-ups that failed after two minutes kept one core busy: no evidence."""
+        rows = [
+            run(i, state="FAILED", elapsed_sec=120, cpu_sec=100.0, peak_mem_bytes=GIB)
+            for i in range(4)
+        ]
+        cpus = rec_for(conf, rows, named(conf, cpus_per_task=16))["cpus"]
+        assert cpus["action"] == "keep" and cpus["suggested"] == 16
+        assert any("ended normally" in note for note in cpus["notes"])
+
+    def test_a_job_that_ran_into_its_limit_still_counts_for_cpus(self, conf):
+        rows = [run(i, state="TIMEOUT", cpu_src="polled") for i in range(4)]
+        cpus = rec_for(conf, rows, named(conf, cpus_per_task=16))["cpus"]
+        assert cpus["action"] == "lower" and cpus["suggested"] == 4
+
+    def test_other_members_sessions_are_advice_never_applied(self, conf):
+        rows = [
+            run(i, user="alice", job_name="vscode", peak_mem_bytes=20 * GIB, state="CANCELLED")
+            for i in range(6)
+        ]
+        target = R.target_from_kind(
+            "vscode", "bob", conf, Request(mem_form="mem", mem_value_mb=256 * 1024)
+        )
+        rec = rec_for(conf, rows, target)
+        assert rec["level"] == "kind" and rec["mem"]["action"] == "lower"
+        assert rec["can_apply"] is False
+        assert any("other members" in reason for reason in rec["apply_blockers"])
+
+    def test_session_limit_is_not_lowered_to_the_limit_that_cut_every_session_off(self, conf):
+        rows = [
+            run(i, job_name="vscode", state="TIMEOUT", elapsed_sec=12 * 3600, req_time_min=720)
+            for i in range(6)
+        ]
+        target = R.target_from_kind("vscode", "alice", conf, Request(time_min=1440))
+        time_ = rec_for(conf, rows, target)["time"]
+        assert time_["action"] == "keep" and time_["suggested"] == 1440
+        assert any("ran until their limit" in note for note in time_["notes"])
+
+    def test_session_limit_is_lowered_from_sessions_that_were_closed_earlier(self, conf):
+        rows = [
+            run(i, job_name="vscode", state="CANCELLED", elapsed_sec=3 * 3600, req_time_min=1440)
+            for i in range(6)
+        ]
+        target = R.target_from_kind("vscode", "alice", conf, Request(time_min=1440))
+        time_ = rec_for(conf, rows, target)["time"]
+        assert time_["action"] == "lower" and time_["suggested"] == 270
+
+    def test_time_is_not_shortened_from_runs_that_had_more_cores(self, conf):
+        """The CPU cut was applied last time: the request now has 4 cores, the runs had 16."""
+        rows = [run(i) for i in range(10)]
+        rec = rec_for(conf, rows, named(conf, cpus_per_task=4, time="2-0"))
+        assert rec["cpus"]["action"] == "keep"
+        assert rec["time"]["action"] == "keep" and rec["time"]["suggested"] == 2880
+        assert any("had more cores" in note for note in rec["time"]["notes"])
+
+    def test_time_is_shortened_once_runs_with_the_same_cores_exist(self, conf):
+        rows = [run(i, req_cpus=4, alloc_cpus=4) for i in range(10)]
+        rec = rec_for(conf, rows, named(conf, cpus_per_task=4, time="2-0"))
+        assert rec["time"]["action"] == "lower"
+
+    def test_per_cpu_memory_is_not_rounded_far_above_the_request(self, conf):
+        rows = [
+            run(i, req_mem_mb=33600, peak_mem_bytes=int(27.5 * GIB), cpu_sec=15 * 3600.0)
+            for i in range(5)
+        ]
+        rec = rec_for(conf, rows, named(conf, cpus_per_task=16, mem_per_cpu="2100M"))
+        assert rec["mem"]["action"] == "keep" and rec["cpus"]["action"] == "keep"
+        assert "--mem-per-cpu=2100M" in rec["options"], rec["options"]
+
+    def test_lowered_per_cpu_memory_adds_up_to_about_the_suggested_total(self, conf):
+        rows = [run(i, req_mem_mb=64 * 1024, peak_mem_bytes=27 * GIB) for i in range(5)]
+        rec = rec_for(conf, rows, named(conf, cpus_per_task=16, mem_per_cpu="4G"))
+        assert rec["cpus"]["action"] == "lower", "which pins the total"
+        option = next(o for o in rec["options"] if o.startswith("--mem-per-cpu="))
+        share_mb = R.sbatch_opts.parse_mem(option.split("=")[1])
+        total_mb = share_mb * rec["cpus"]["suggested"]
+        assert rec["mem"]["suggested"] <= total_mb <= rec["mem"]["suggested"] * 1.05
+
+    def test_per_unit_rounding_steps(self):
+        assert R.round_mem_mb(100, per_unit=True) == 128
+        assert R.round_mem_mb(2062.5, per_unit=True) == 2176
+        assert R.round_mem_mb(9000, per_unit=True) == 9088
+
+    def test_value_the_submission_does_not_state_is_passed_on_when_applied(self, conf):
+        """The last run asked for 64 GB on its command line; this submission states nothing,
+        so sbatch would fall back to the cluster's default."""
+        rows = [
+            run(i, peak_mem_bytes=52 * GIB, elapsed_sec=40 * 3600, cpu_sec=15 * 40 * 3600.0)
+            for i in range(5)
+        ]
+        target = submitted(conf, "mplx12k-spleen", "sbatch run_mplx.sh", cpus_per_task=16)
+        rec = rec_for(conf, rows, target)
+        assert rec["cpus"]["action"] == "keep"
+        assert rec["mem"]["requested_from"] == "last run" and rec["mem"]["action"] == "keep"
+        assert rec["changes"].get("mem") == "--mem=64G"
+        assert rec["changes"].get("time") == "--time=2-00:00:00"
+
+    def test_stored_multi_task_job_is_not_sized_as_one_task(self, conf):
+        pending = run(
+            99,
+            state="PENDING",
+            submit_line="sbatch -n 16 --mem=64G mpi_job.sh",
+            job_name="mpi_job.sh",
+            req_cpus=16,
+            alloc_cpus=None,
+            n_steps=0,
+            n_tasks=None,
+        )
+        req = R.request_of_job(pending)
+        assert req.ntasks == 16 and req.cpus_per_task == 1 and req.multi
+
+    def pending(self, **kwargs):
+        options = dict(
+            state="PENDING",
+            job_name="mpi_job.sh",
+            submit_line="sbatch mpi_job.sh",
+            alloc_cpus=None,
+            n_steps=0,
+            n_tasks=None,
+        )
+        options.update(kwargs)
+        return run(99, **options)
+
+    def test_stored_job_whose_task_layout_is_unknown(self, conf):
+        """A pending job has no steps; 16 CPUs may be 16 tasks or one task with 16 threads,
+        and the earlier runs of its family, which asked for 8, do not say."""
+        rows = [
+            run(i, job_name="mpi_job.sh", submit_line="sbatch mpi_job.sh", req_cpus=8, alloc_cpus=8)
+            for i in range(5)
+        ]
+        target = R.target_from_job(history.annotate([self.pending()], conf)[0], conf)
+        cpus = rec_for(conf, rows, target)["cpus"]
+        assert cpus["action"] == "keep" and cpus["suggested"] == 16
+        assert any("how its CPUs are divided into tasks" in note for note in cpus["notes"])
+
+    def test_pending_job_borrows_the_layout_of_its_familys_last_run(self, conf):
+        rows = [run(i, job_name="mpi_job.sh", submit_line="sbatch mpi_job.sh") for i in range(5)]
+        target = R.target_from_job(history.annotate([self.pending()], conf)[0], conf)
+        assert rec_for(conf, rows, target)["cpus"]["suggested"] == 4, (
+            "one task of 16 CPUs, like them"
+        )
+        rows = [
+            run(i, job_name="mpi_job.sh", submit_line="sbatch mpi_job.sh", n_tasks=16)
+            for i in range(5)
+        ]
+        cpus = rec_for(conf, rows, target)["cpus"]
+        assert cpus["action"] == "keep" and cpus["kept_because"] == "multi"
+
+
+# Rows whose jobs had the two cores the time tests ask for: a limit is not
+# shortened from runs that had more cores than the request.
+TWO_CORES = {"req_cpus": 2, "alloc_cpus": 2}
+
+
 class TestTime:
     def test_high_percentile_times_headroom(self, conf):
-        rows = [run(i, elapsed_sec=1800 + 60 * i) for i in range(10)]  # 30..39 minutes
+        rows = [run(i, elapsed_sec=1800 + 60 * i, **TWO_CORES) for i in range(10)]  # 30..39 minutes
         time_ = rec_for(conf, rows, named(conf, time="1-0", cpus_per_task=2))["time"]
         assert time_["suggested"] == 60  # 39 x 1.5 = 58.5 -> next 5 minutes
         assert time_["action"] == "lower"
 
     def test_at_least_the_longest_completed_run(self, conf):
-        rows = [run(i, elapsed_sec=600) for i in range(20)]
-        rows.append(run(40, elapsed_sec=6000))  # 100 minutes; p95 of the last 20 is still 10
+        rows = [run(i, elapsed_sec=600, **TWO_CORES) for i in range(20)]
+        rows.append(run(40, elapsed_sec=6000, **TWO_CORES))  # 100 min; p95 of the last 20 is 10
         time_ = rec_for(conf, rows, named(conf, time="1-0", cpus_per_task=2))["time"]
         assert time_["suggested"] == 120  # 100 x 1.1 = 110 -> next 15 minutes
         assert "longest of 20" in time_["basis"]
@@ -322,7 +526,7 @@ class TestTime:
         assert "time" not in rec["changes"]
 
     def test_minimum(self, conf):
-        rows = [run(i, elapsed_sec=130, req_time_min=60) for i in range(5)]
+        rows = [run(i, elapsed_sec=130, req_time_min=60, **TWO_CORES) for i in range(5)]
         time_ = rec_for(conf, rows, named(conf, time="60", cpus_per_task=2))["time"]
         assert time_["suggested"] == conf.min_time_min
 
@@ -419,7 +623,11 @@ class TestOptions:
             conf, rows, submitted(conf, "mplx12k-spleen", "sbatch run.sh", cpus_per_task=16)
         )
         assert rec["mem"]["requested_from"] == "last run" and rec["mem"]["action"] == "keep"
-        assert rec["changes"] == {"cpus": "--cpus-per-task=4", "mem": "--mem=64G"}
+        assert rec["changes"] == {
+            "cpus": "--cpus-per-task=4",
+            "mem": "--mem=64G",
+            "time": "--time=2-00:00:00",  # not stated either: passed on, or the default applies
+        }
 
     def test_whole_node_memory_is_never_applied(self, conf):
         rows = [run(i) for i in range(5)]

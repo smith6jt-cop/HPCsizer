@@ -15,6 +15,7 @@ from lib.analyzer import (
     ignored_directives,
     inputs_from_arguments,
     is_shell_script,
+    looks_up_its_own_path,
     parse_sbatch_directives,
     referenced_scripts,
     request_from_options,
@@ -417,3 +418,22 @@ class TestAnalyzeSubmission:
     def test_script_on_standard_input(self):
         sub = analyze_submission(["--mem=4G"])
         assert sub.job_name == "sbatch" and sub.script_path is None and sub.request.mem_mb == 4096
+
+
+class TestOwnPathLookup:
+    def test_forms_of_the_idiom(self):
+        for text in (
+            "scontrol show job $SLURM_JOB_ID | awk -F= '/Command=/{print $2}'",
+            "SCRIPT=$(scontrol show jobid -dd $SLURM_JOBID | grep Command | cut -d= -f2)",
+            "scontrol -o show job ${SLURM_JOB_ID} | sed 's/.*Command=//'",
+        ):
+            assert looks_up_its_own_path(text), text
+
+    def test_other_uses_of_scontrol(self):
+        for text in (
+            "scontrol show job $SLURM_JOB_ID",
+            "scontrol show hostnames $SLURM_JOB_NODELIST",
+            "echo Command=$0",
+            "",
+        ):
+            assert not looks_up_its_own_path(text), text

@@ -9,10 +9,11 @@ code itself -- never only from ``~/.bashrc`` exports.
 """
 
 import configparser
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Mapping, Optional
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -38,6 +39,65 @@ DEFAULT_GENERIC_NAMES = (
 
 
 DEFAULT_DATA_ROOTS = ("/blue", "/orange", "/red", "/scratch", "/home")
+
+
+class ConfigError(Exception):
+    """The configuration file cannot be read at all."""
+
+
+def _at_least(low: float) -> Tuple[str, Callable[[float], bool]]:
+    return "at least %g" % low, lambda value: value >= low
+
+
+def _above(low: float) -> Tuple[str, Callable[[float], bool]]:
+    return "greater than %g" % low, lambda value: value > low
+
+
+# What a numeric setting must satisfy for the code to work with it. A value
+# outside its rule is not used: the default is, and the problem is reported.
+RULES: Dict[str, Tuple[str, Callable[[float], bool]]] = {
+    # collector
+    "overlap_days": _at_least(0),
+    "deep_days": _above(0),
+    "deep_every_days": _above(0),
+    "first_days": _above(0),
+    "slice_days": _above(0),
+    "refresh_minutes": _at_least(0),
+    "stale_hours": _above(0),
+    "lock_stale_minutes": _above(0),
+    "retries": _at_least(1),
+    "retry_delay": _at_least(0),
+    # measurement
+    "acct_sample_sec": _at_least(1),
+    # policy
+    "lookback_days": _above(0),
+    "last_n": _at_least(1),
+    "min_runs": _at_least(1),
+    "min_runs_pooled": _at_least(1),
+    "mem_headroom": _at_least(1),
+    "cpu_headroom": _at_least(1),
+    "time_headroom": _at_least(1),
+    "time_percentile": ("greater than 0 and at most 1", lambda value: 0 < value <= 1),
+    "min_time_min": _at_least(1),
+    "oom_raise": _at_least(1),
+    "timeout_raise": _at_least(1),
+    "model_min_points": _at_least(2),
+    "model_min_r2": ("between 0 and 1", lambda value: 0 <= value <= 1),
+}
+
+
+def convert(key: str, raw: str, whole: bool):
+    """``raw`` as the number setting ``key`` takes. Raises ``ValueError`` saying what is wrong."""
+    try:
+        value = int(raw) if whole else float(raw)
+    except ValueError:
+        raise ValueError("%r is not a %snumber" % (raw, "whole " if whole else "")) from None
+    if not math.isfinite(value):
+        raise ValueError("%r is not a finite number" % raw)
+    rule = RULES.get(key)
+    if rule is not None and not rule[1](value):
+        raise ValueError("%r must be %s" % (raw, rule[0]))
+    return value
 
 
 @dataclass
@@ -87,6 +147,9 @@ class Config:
 
     # In-job sampler: also read perf counters of the busiest process every 5 minutes
     profile_perf: bool = False
+    # In-job sampler: on a job with several nodes, also sample the other nodes
+    # (through one more srun step in the job)
+    profile_multi_node: bool = True
     # Mode the spool is created with: group-writable, setgid and sticky, so that
     # every member's jobs can add files and nobody can remove another's.
     spool_mode: int = 0o3770
@@ -112,6 +175,9 @@ class Config:
     model_min_points: int = 10
     model_min_r2: float = 0.5
 
+    # Settings that could not be used as written; the defaults apply to them
+    problems: List[str] = field(default_factory=list)
+
     @property
     def lock_path(self) -> str:
         return self.db_path + ".lock"
@@ -134,7 +200,11 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
     ini = configparser.ConfigParser(interpolation=None)
     ini_file = _ini_path(env, root)
     if ini_file.is_file():
-        ini.read(ini_file)
+        try:
+            ini.read(ini_file)
+        except (configparser.Error, OSError, UnicodeDecodeError) as exc:
+            reason = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+            raise ConfigError("cannot read %s: %s" % (ini_file, reason)) from None
 
     def get(section: str, key: str, default: str = "") -> str:
         if ini.has_option(section, key):
@@ -208,12 +278,18 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
             "model_min_r2",
         ),
     }
+
+    def number(where: str, key: str, raw: str) -> None:
+        try:
+            setattr(cfg, key, convert(key, raw, isinstance(getattr(cfg, key), int)))
+        except ValueError as exc:
+            cfg.problems.append("%s: %s; using %s" % (where, exc, getattr(cfg, key)))
+
     for section, keys in numeric.items():
         for key in keys:
             raw = get(section, key)
             if raw:
-                current = getattr(cfg, key)
-                setattr(cfg, key, int(raw) if isinstance(current, int) else float(raw))
+                number("%s: [%s] %s" % (ini_file.name, section, key), key, raw)
 
     for key in ("session_names", "generic_names"):
         raw = get("classify", key)
@@ -223,13 +299,21 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         cfg.data_roots = _split(get("paths", "data_roots"))
     if get("profile", "perf"):
         cfg.profile_perf = get("profile", "perf").lower() in ("1", "yes", "true", "on")
+    if get("profile", "multi_node"):
+        cfg.profile_multi_node = get("profile", "multi_node").lower() in ("1", "yes", "true", "on")
     if get("profile", "spool_mode"):
-        cfg.spool_mode = int(get("profile", "spool_mode"), 8)
+        try:
+            cfg.spool_mode = int(get("profile", "spool_mode"), 8) & 0o7777
+        except ValueError:
+            cfg.problems.append(
+                "%s: [profile] spool_mode: %r is not an octal mode; using %o"
+                % (ini_file.name, get("profile", "spool_mode"), cfg.spool_mode)
+            )
 
     # Kept from the previous harvester so existing overrides (and the test
     # suite, which zeroes the backoff) continue to work.
     if env.get("HPCSIZER_HARVEST_RETRIES"):
-        cfg.retries = int(env["HPCSIZER_HARVEST_RETRIES"])
+        number("HPCSIZER_HARVEST_RETRIES", "retries", env["HPCSIZER_HARVEST_RETRIES"])
     if env.get("HPCSIZER_HARVEST_RETRY_DELAY"):
-        cfg.retry_delay = float(env["HPCSIZER_HARVEST_RETRY_DELAY"])
+        number("HPCSIZER_HARVEST_RETRY_DELAY", "retry_delay", env["HPCSIZER_HARVEST_RETRY_DELAY"])
     return cfg

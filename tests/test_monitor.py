@@ -164,8 +164,12 @@ class TestProcessTree:
     def test_cpu_time_of_finished_children_is_kept(self):
         tree = sampler.ProcessTree(os.getpid(), "/proc")
         before = tree.sample()["cpu"]
-        subprocess.run([sys.executable, "-c", "sum(range(6_000_000))"], check=True)
-        assert tree.sample()["cpu"] > before + 0.05, "a reaped child's time stays with its parent"
+        # The child burns a fixed amount of CPU time, not a fixed amount of work:
+        # on a fast machine six million additions take about the 0.05 s this
+        # test used to ask for, and it failed there once in a while.
+        burn = "import time\nt = time.process_time()\nwhile time.process_time() - t < 0.5: pass"
+        subprocess.run([sys.executable, "-c", burn], check=True)
+        assert tree.sample()["cpu"] > before + 0.3, "a reaped child's time stays with its parent"
 
     def test_command_names_with_spaces_and_parentheses(self, tmp_path):
         proc = tmp_path / "proc"

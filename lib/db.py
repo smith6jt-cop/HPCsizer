@@ -36,7 +36,7 @@ import sqlite3
 import stat
 import tempfile
 import time
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 SCHEMA_VERSION = 3
@@ -808,7 +808,7 @@ class SnapshotWriter:
         staged = "%s.tmp.%s.%d" % (self.db_path, socket.gethostname(), os.getpid())
         try:
             shutil.copyfile(self.local, staged)
-            os.chmod(staged, 0o644)
+            set_shared(staged, os.path.dirname(os.path.abspath(self.db_path)))
             _fsync_file(staged)
             # If the published file changed since it was copied, another writer
             # got past the lock; publishing would discard its work.
@@ -833,6 +833,45 @@ class SnapshotWriter:
             shutil.rmtree(self.workdir, ignore_errors=True)
             self.workdir = None
         self.lock.release()
+
+
+def shared_modes(directory: str) -> Tuple[int, int]:
+    """``(file mode, directory mode)`` for what is published in ``directory``.
+
+    Who may read the database is decided in one place: the directory it lies
+    in. Whoever may enter that directory may read what is published there, and
+    nobody else -- a 2750 directory gives 0640 files, an open one 0644, a
+    private one 0600 -- whatever the umask of the process that writes it.
+    """
+    try:
+        mode = os.stat(directory).st_mode
+    except OSError:
+        return 0o640, 0o750
+    group = bool(mode & stat.S_IXGRP)
+    other = bool(mode & stat.S_IXOTH)
+    return (
+        0o600 | (0o040 if group else 0) | (0o004 if other else 0),
+        0o700 | (0o050 if group else 0) | (0o005 if other else 0),
+    )
+
+
+def set_shared(path: str, directory: str) -> None:
+    """Give a freshly written file the readers of ``directory``."""
+    mode, _dir_mode = shared_modes(directory)
+    try:
+        group = os.stat(directory).st_gid
+        if os.stat(path).st_gid != group:
+            try:
+                os.chown(path, -1, group)
+            except OSError:
+                # The file cannot be given the directory's group, so its group
+                # bits would name the wrong people. Those the directory lets in
+                # then read it as "others"; the directory still keeps everybody
+                # else out.
+                mode |= 0o004 if mode & 0o040 else 0
+    except OSError:
+        pass
+    os.chmod(path, mode)
 
 
 def _insert(conn: sqlite3.Connection, table: str, columns: Sequence[str], values: Sequence[Any]):
@@ -1167,7 +1206,7 @@ def migrate_v2(
 
         staged = "%s.tmp.%s.%d" % (db_path, socket.gethostname(), os.getpid())
         shutil.copyfile(new_local, staged)
-        os.chmod(staged, 0o644)
+        set_shared(staged, os.path.dirname(os.path.abspath(db_path)))
         _fsync_file(staged)
         os.replace(staged, db_path)
         for suffix in ("-wal", "-shm"):

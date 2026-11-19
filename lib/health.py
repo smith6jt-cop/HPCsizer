@@ -40,6 +40,36 @@ def spool_state(cfg: Config) -> Dict[str, Any]:
     return info
 
 
+def readable_by_others(cfg: Config, top: str = "/") -> bool:
+    """Can a user outside the group read the database?
+
+    It holds the job names, command lines and working directories of every
+    member. True when the file is readable by others and every directory
+    between it and ``top`` lets others in.
+    """
+    path = os.path.abspath(cfg.db_path)
+    try:
+        if not os.stat(path).st_mode & stat.S_IROTH:
+            return False
+        folder = os.path.dirname(path)
+        top = os.path.abspath(top)
+        while folder != top and folder != os.path.dirname(folder):
+            if not os.stat(folder).st_mode & stat.S_IXOTH:
+                return False
+            folder = os.path.dirname(folder)
+    except OSError:
+        return False
+    return True
+
+
+def _open_to_others(cfg: Config) -> str:
+    return (
+        "the database can be read by every user of the cluster, with the job names, command "
+        "lines and working directories of all members (chmod o-rx %s; the next harvest then "
+        "closes the file too)" % os.path.dirname(os.path.abspath(cfg.db_path))
+    )
+
+
 def writable_by_others(cfg: Config) -> List[str]:
     """Code that other members' jobs execute and that someone other than its owner can change.
 
@@ -137,6 +167,8 @@ def status(cfg: Config, now: Optional[int] = None, with_sacct: bool = True) -> D
             "writable by others, yet run inside members' profiled jobs: %s (chmod go-w)"
             % ", ".join(risky)
         )
+    if readable_by_others(cfg):
+        problems.append(_open_to_others(cfg))
     out["ok"] = out.get("state") == "ok" and not out.get("coverage", {}).get("missing")
     return out
 
@@ -384,6 +416,22 @@ def preflight(
             else "the sampler and the code are writable by their owner only",
         )
     )
+
+    if os.path.exists(cfg.db_path):
+        open_to_all = readable_by_others(cfg)
+        checks.append(
+            _check(
+                "database privacy",
+                WARN if open_to_all else PASS,
+                _open_to_others(cfg)
+                if open_to_all
+                else "users outside the group cannot read the database",
+            )
+        )
+    else:
+        checks.append(
+            _check("database privacy", INFO, "no database yet; it will follow its directory")
+        )
 
     spool = spool_state(cfg)
     checks.append(

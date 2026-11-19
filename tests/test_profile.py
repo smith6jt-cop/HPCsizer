@@ -396,6 +396,32 @@ class TestIngest:
         names = sorted(os.path.basename(p) for p in profile.series_files(cfg, stored(cfg)["4242"]))
         assert [n.split(".")[1] for n in names] == ["c1", "c1_2"]
 
+    def test_names_in_the_log_cannot_forge_lines_or_colour_a_terminal(self, cfg, stubs, spool, now):
+        """The node part of a spool file name is chosen by whoever creates the file."""
+        stubs.sacct_default(self.job(now, user=OTHER))
+        name = "4242.c1\x1b[31m\n[harvest] all is well.tsv"
+        with open(os.path.join(spool, name), "w") as handle:
+            handle.write(series_text(steady(30), start=now - 3570))
+        messages = []
+        harvest(cfg, now, messages.append)
+        about = [m for m in messages if "4242." in m]
+        assert about, "the file is reported"
+        assert all("\x1b" not in m and "\n" not in m for m in messages)
+        assert any("\\x1b[31m\\x0a[harvest] all is well.tsv ignored" in m for m in about)
+
+    def test_archive_follows_the_databases_directory(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        self.write(spool, now)
+        os.chmod(cfg.root, 0o750)
+        try:
+            harvest(cfg, now)
+            (archive,) = profile.series_files(cfg, stored(cfg)["4242"])
+            assert oct(os.stat(archive).st_mode & 0o777) == "0o640"
+            assert oct(os.stat(cfg.ts_dir).st_mode & 0o777) == "0o750"
+            assert oct(os.stat(cfg.db_path).st_mode & 0o777) == "0o640"
+        finally:
+            os.chmod(cfg.root, 0o755)
+
     def test_archive_is_readable_like_the_database(self, cfg, stubs, spool, now):
         stubs.sacct_default(self.job(now))
         self.write(spool, now)

@@ -331,5 +331,18 @@ killed before Slurm recorded its CPU time. Submit with `hpg submit` once and
 the profile fills it in.
 
 **Can I see someone else's jobs?** Yes: `--user NAME` on `recommend`, `report`,
-`history`, `flags`, `families`, `export` and `queue`. Everything stored comes
-from Slurm's accounting, which members of an account can already query.
+`history`, `flags`, `families`, `export` and `queue`. See the next question for
+what there is to see.
+
+**What is recorded about my jobs, and who can read it?** For every job of the
+account: what Slurm's accounting holds, which members of the account can query
+anyway — job name, command line, working directory, state, times, requests and
+measured use. For a job submitted with `hpg submit`, in addition: the directory
+it was submitted from, the paths and sizes of the input files named in the
+script, a checksum of the script (not its text), the tools it was recognised to
+use, what was suggested and what was applied; and from inside the job, every
+few seconds, its memory, CPU, I/O and GPU use and the names of its largest
+processes. Everybody who can read the checkout — the group — can read all of
+it; nobody else can, as long as the directory is closed to others (`hpg status`
+says so when it is not). `--no-profile` leaves out what is recorded inside the
+job.

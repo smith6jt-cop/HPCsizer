@@ -305,7 +305,7 @@ and says when there are others.
 | What | Who needs what |
 |---|---|
 | the checkout (`bin/`, `lib/`) | members: read. **Nobody but you: write.** A profiled job runs `bin/monitor.py` as the member who submitted it; if others could edit that file they could run code inside everyone's jobs. `hpg status` and `hpg preflight` warn when it is group- or world-writable. |
-| `profiles.db`, `timeseries/` | members: read |
+| `profiles.db`, `timeseries/` | members: read. Their modes follow the directory the database is in: whoever may enter it may read them (a 2750 directory gives 0640 files), whatever the umask of the harvest. Close that directory to others (`chmod o-rx`): the database holds every member's job names, command lines and working directories. `hpg status` and `hpg preflight` say so when users outside the group can read it. |
 | `spool/`, `spool/submit/` | members: write. Created by the first harvest with mode 3770 — group-writable, setgid, sticky: members' jobs can add files, nobody can remove another's. |
 
 Every member can write to the spool, so any member can put anything there
@@ -413,6 +413,7 @@ check:
 | value forms | `TotalCPU` and `MaxRSS` are in a known form | FAIL shows the value |
 | full-retention query | 182 days can be queried in one go | lower `first_days` or `slice_days` |
 | unfinished jobs query | `sacct -s PENDING,RUNNING` lists the present | only `hpg queue` is affected |
+| database privacy | users outside the group cannot read the database | WARN: `chmod o-rx` the directory it is in; the next harvest closes the file as well |
 | scrontab enabled / answers | `scrontab` can be used | `hpg schedule install --mode chain` |
 | code permissions | nobody else can write the code | `chmod go-w` |
 | compute node (`--compute`) | which cgroup version jobs run under; Python on the nodes | set `compute_python` |

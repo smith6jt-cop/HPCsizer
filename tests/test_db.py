@@ -189,6 +189,40 @@ class TestReadOnly:
             db.connect_ro(dbfile)
 
 
+class TestWhoMayReadTheDatabase:
+    """The directory decides who can read what is published in it; the file follows."""
+
+    @pytest.mark.parametrize(
+        "directory, expected",
+        [(0o2750, "0o640"), (0o750, "0o640"), (0o755, "0o644"), (0o700, "0o600"), (0o711, "0o644")],
+    )
+    def test_published_file_follows_its_directory(self, tmp_path, directory, expected):
+        folder = tmp_path / "store"
+        folder.mkdir()
+        folder.chmod(directory)
+        path = str(folder / "profiles.db")
+        before = os.umask(0o022)
+        try:
+            write_jobs(path, make_job(1))
+            assert oct(os.stat(path).st_mode & 0o777) == expected
+            write_jobs(path, make_job(2))
+            assert oct(os.stat(path).st_mode & 0o777) == expected, "also when replacing it"
+        finally:
+            os.umask(before)
+            folder.chmod(0o755)
+
+    def test_umask_does_not_matter(self, tmp_path):
+        folder = tmp_path / "store"
+        folder.mkdir()
+        folder.chmod(0o750)
+        before = os.umask(0o077)
+        try:
+            write_jobs(str(folder / "profiles.db"), make_job(1))
+        finally:
+            os.umask(before)
+        assert oct(os.stat(str(folder / "profiles.db")).st_mode & 0o777) == "0o640"
+
+
 class TestColumnsAddedLater:
     """A database written by the first release lacks columns that were added since."""
 

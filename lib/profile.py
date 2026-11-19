@@ -623,13 +623,19 @@ def _remove_orphan(path: str, now: int) -> None:
 
 def _archive(cfg: Config, data: bytes, job_id_raw: int, submit_ts: Optional[int], node: str) -> str:
     """Store one node's series, compressed. ``data`` is what was read and checked, not a path."""
-    os.makedirs(cfg.ts_dir, exist_ok=True)
+    # Archives are read by the people who read the database: both follow the
+    # directory the database lies in.
+    home = os.path.dirname(os.path.abspath(cfg.db_path))
+    if not os.path.isdir(cfg.ts_dir):
+        os.makedirs(cfg.ts_dir, exist_ok=True)
+        _file_mode, dir_mode = db.shared_modes(home)
+        os.chmod(cfg.ts_dir, (os.stat(cfg.ts_dir).st_mode & 0o7000) | dir_mode)
     name = "%d-%d.%s.tsv.gz" % (int(job_id_raw), int(submit_ts or 0), safe_node(node) or "node")
     dst = os.path.join(cfg.ts_dir, name)
     tmp = dst + ".tmp"
     with gzip.open(tmp, "wb") as target:
         target.write(data)
-    os.chmod(tmp, 0o644)  # like the database: readable by whoever can reach the directory
+    db.set_shared(tmp, home)
     os.replace(tmp, dst)
     return dst
 
@@ -860,6 +866,10 @@ def ingest_spool(
     been published; nothing here can make a harvest fail.
     """
     now = int(time.time()) if now is None else int(now)
+    # File names in the spool are chosen by whoever creates the file; nothing
+    # of them may reach a log, or a terminal, as anything but visible text.
+    raw_log = log
+    log = lambda message: raw_log(clean(message))  # noqa: E731
     if not ensure_spool(cfg, log):
         return 0
     groups: Dict[str, List[str]] = {}

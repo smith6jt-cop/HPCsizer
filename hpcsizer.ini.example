@@ -60,12 +60,12 @@ session_names = vscode
 # counters of the busiest process every five minutes (needs `perf` on the
 # compute nodes and kernel.perf_event_paranoid <= 2).
 perf = no
-# A job on several nodes is profiled on the node that runs its batch script;
-# the profile then counts as a lower bound for the job. With multi_node = yes
-# the sampler starts one more sampler on each other node through
-# `srun --overlap --mem=0`: one more step in the job. Tried on Slurm 23.11
-# only; submit a multi-node test job of your own before turning it on.
-multi_node = no
+# On a job with several nodes the sampler starts one more sampler on each
+# other node through `srun --overlap --mem=0`, so that every node is profiled.
+# That is one more step in the job, visible in its accounting. With
+# multi_node = no only the node that runs the batch script is profiled, and the
+# profile counts as a lower bound for the job.
+multi_node = yes
 # The spool is created by the first harvest with this mode: writable by the
 # group (so members' jobs can record profiles), setgid and sticky. Use 0700 to
 # profile only your own jobs.

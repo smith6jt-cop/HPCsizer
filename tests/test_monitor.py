@@ -465,11 +465,10 @@ class TestSeveralNodes:
         assert sampler.run(args, environ) == 0 and (tmp_path / "5.c1.tsv").exists()
         return bool(called)
 
-    def test_other_nodes_are_sampled_only_when_asked(self, tmp_path, monkeypatch):
-        """One more srun step inside somebody's job: only when asked for."""
-        assert self.once(tmp_path / "a", monkeypatch) is False
-        assert self.once(tmp_path / "b", monkeypatch, "--fan-out") is True
-        assert self.once(tmp_path / "c", monkeypatch, "--fan-out", "--no-fan-out") is False
+    def test_other_nodes_are_sampled_unless_turned_off(self, tmp_path, monkeypatch):
+        assert self.once(tmp_path / "a", monkeypatch) is True
+        assert self.once(tmp_path / "b", monkeypatch, "--no-fan-out") is False
+        assert self.once(tmp_path / "c", monkeypatch, "--fan-out") is True, "still accepted"
 
     def test_sampler_on_another_node_needs_the_jobs_cgroup(self, tmp_path):
         """Started there through srun it has no process tree of the job to follow."""

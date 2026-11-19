@@ -89,7 +89,7 @@ class Config:
     profile_perf: bool = False
     # In-job sampler: on a job with several nodes, also sample the other nodes
     # (through one more srun step in the job)
-    profile_multi_node: bool = False
+    profile_multi_node: bool = True
     # Mode the spool is created with: group-writable, setgid and sticky, so that
     # every member's jobs can add files and nobody can remove another's.
     spool_mode: int = 0o3770

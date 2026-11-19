@@ -74,17 +74,20 @@ def parse(*args):
 
 
 class TestSamplerOptions:
-    def test_other_nodes_and_perf_only_when_configured(self, conf):
-        assert "--fan-out" not in submit.sampler_line(conf) and "--perf" not in submit.sampler_line(
-            conf
-        )
-        conf.profile_multi_node = conf.profile_perf = True
-        line = submit.sampler_line(conf)
-        assert " --perf --fan-out </dev/null" in line
+    def test_other_nodes_are_sampled_unless_turned_off(self, conf):
+        assert "fan-out" not in submit.sampler_line(conf), "the sampler does it by default"
+        conf.profile_multi_node = False
+        assert " --no-fan-out </dev/null" in submit.sampler_line(conf)
+
+    def test_perf_only_when_configured(self, conf):
+        assert "--perf" not in submit.sampler_line(conf)
+        conf.profile_perf = True
+        assert " --perf </dev/null" in submit.sampler_line(conf)
 
     def test_ini_setting(self, root, stubs):
-        (root / "hpcsizer.ini").write_text("[profile]\nmulti_node = yes\n")
         assert load_config().profile_multi_node is True
+        (root / "hpcsizer.ini").write_text("[profile]\nmulti_node = no\n")
+        assert load_config().profile_multi_node is False
 
 
 class TestSamplerLine:

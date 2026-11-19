@@ -349,19 +349,21 @@ of the script (or in front of a `--wrap` command):
 cgroup; `hpg preflight --compute` runs a one-minute job that reports which
 cgroup version the compute nodes use.
 
-A job on several nodes is profiled on the node that runs its batch script.
-Such a profile is marked "profiled on 1 of N nodes" and counts as a lower
-bound for the job; accounting's per-step figures cover the other nodes.
+On a job with several nodes the first sampler starts one more sampler on each
+other node through `srun --overlap --mem=0`; each writes its own file and the
+harvester combines them. That is one more step in the job, visible in its
+accounting. `--overlap` lets it share the job's CPUs with the job's own steps
+and `--mem=0` makes it ask for no memory of its own.
 
-With `multi_node = yes` under `[profile]` the sampler starts one more sampler
-on each other node through `srun --overlap --mem=0`; each writes its own file
-and the harvester combines them. That is one more step in the job, visible in
-its accounting. It is off by default because it has been tried on Slurm 23.11
-only, without cgroups: there the job's own `srun` steps ran unaffected whether
-they started before or after the sampler's step, for jobs requested with
-`--mem` and with `--mem-per-cpu`. Submit one multi-node test job of your own
-with the setting on (`hpg job ID` should then list every node) before turning
-it on for the group.
+This has been tried on Slurm 23.11 without cgroups: in twelve runs (jobs
+requested with `--mem` and with `--mem-per-cpu`, the sampler's step before and
+after the job's own) the job's own `srun` steps ran at once and succeeded every
+time. It has not been tried on the cluster's Slurm version: after the first
+multi-node job submitted with `hpg submit`, check that `hpg job ID` lists every
+node and that the job ran as usual. `multi_node = no` under `[profile]` turns
+it off; then only the node that runs the batch script is profiled, the profile
+is marked "profiled on 1 of N nodes" and counts as a lower bound for the job,
+while accounting's per-step figures cover the other nodes.
 
 Where no cgroup of the job is found (a cluster without the cgroup plugins) the
 sampler follows the batch script's process tree instead. That does not include

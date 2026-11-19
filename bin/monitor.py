@@ -800,7 +800,7 @@ def run(args, environ=None):
         "perf_failures": 0,
         "perf_ticks": {},
     }
-    child = fan_out(args, environ) if args.fan_out and not args.no_fan_out else None
+    child = None if args.no_fan_out else fan_out(args, environ)
 
     rows = 0
     limit = started + args.max_days * 86400.0
@@ -858,12 +858,12 @@ def build_parser():
     parser.add_argument("--perf", action="store_true", help="also sample perf counters every 5 min")
     parser.add_argument("--no-node-counters", action="store_true")
     parser.add_argument(
-        "--fan-out",
+        "--no-fan-out",
         action="store_true",
-        help="on a job with several nodes, start a sampler on each other node with srun "
-        "(one more step in the job; off unless asked for)",
+        help="on a job with several nodes, do not start a sampler on each other node "
+        "(which is done with one more srun step in the job)",
     )
-    parser.add_argument("--no-fan-out", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--fan-out", action="store_true", help=argparse.SUPPRESS)  # the default
     parser.add_argument("--skip-node", help=argparse.SUPPRESS)
     parser.add_argument("--proc-root", default="/proc", help=argparse.SUPPRESS)
     parser.add_argument("--cgroup-root", default="/sys/fs/cgroup", help=argparse.SUPPRESS)

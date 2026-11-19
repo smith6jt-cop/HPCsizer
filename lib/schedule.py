@@ -30,6 +30,10 @@ class ScheduleError(Exception):
     pass
 
 
+class ToolMissing(ScheduleError):
+    """The command is not installed here -- as opposed to having failed."""
+
+
 def launcher(cfg: Config) -> str:
     return os.path.join(cfg.root, "bin", "harvest.sh")
 
@@ -101,7 +105,9 @@ def find_block(text: str) -> Optional[str]:
     return "\n".join(lines[start : end + 1])
 
 
-def _run(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
+def _run(
+    cmd: List[str], timeout: int = 60, env: Optional[Dict[str, str]] = None
+) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             cmd,
@@ -109,9 +115,10 @@ def _run(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
             stderr=subprocess.PIPE,
             universal_newlines=True,
             timeout=timeout,
+            env=env,
         )
     except FileNotFoundError:
-        raise ScheduleError("'%s' not found" % cmd[0]) from None
+        raise ToolMissing("'%s' not found" % cmd[0]) from None
     except subprocess.TimeoutExpired:
         raise ScheduleError("'%s' did not answer within %d s" % (cmd[0], timeout)) from None
 
@@ -146,13 +153,22 @@ def chain_command(cfg: Config, every: str = "hour") -> List[str]:
     return (
         [cfg.sbatch, "--parsable", "--dependency=singleton"]
         + _sbatch_options(cfg)
-        + [
-            "--export=ALL,HPCSIZER_ROOT=%s" % cfg.root,
-            launcher(cfg),
-            "--chain",
-            CHAIN_INTERVAL[every],
-        ]
+        + ["--export=ALL", launcher(cfg), "--chain", CHAIN_INTERVAL[every]]
     )
+
+
+def chain_environment(cfg: Config) -> Dict[str, str]:
+    """Environment the first chain job is submitted with, and every successor inherits.
+
+    Each run queues the next one itself, from a copy of the launcher on the
+    node, before it touches the shared file system. It can therefore read
+    neither the configuration nor this code at that moment: the root and the
+    sbatch options have to travel with the job (``--export=ALL``).
+    """
+    env = dict(os.environ)
+    env["HPCSIZER_ROOT"] = cfg.root
+    env["HPCSIZER_SBATCH_OPTS"] = " ".join(_sbatch_options(cfg))
+    return env
 
 
 def chain_jobs(cfg: Config) -> List[str]:
@@ -187,7 +203,7 @@ def install(cfg: Config, every: str = "hour", mode: str = "scrontab", dry_run: b
             raise ScheduleError(
                 "a %s job is already queued; run 'hpg schedule remove' first" % JOB_NAME
             )
-        proc = _run(cmd)
+        proc = _run(cmd, env=chain_environment(cfg))
         if proc.returncode != 0:
             raise ScheduleError((proc.stderr or proc.stdout).strip() or "sbatch failed")
         return "submitted chain job %s\n" % proc.stdout.strip()
@@ -195,23 +211,43 @@ def install(cfg: Config, every: str = "hour", mode: str = "scrontab", dry_run: b
 
 
 def remove(cfg: Config) -> List[str]:
-    """Remove the scrontab block and cancel chain jobs. Returns what was removed."""
+    """Remove the scrontab block and cancel chain jobs. Returns what was removed.
+
+    Both are always attempted. A command that is not installed is not an error
+    (a cluster has scrontab or it does not); one that fails is, and is raised
+    after the other has been tried -- reporting success while a chain keeps
+    resubmitting itself would be worse than failing.
+    """
     done: List[str] = []
+    failed: List[str] = []
+    missing = 0
     try:
         current = read_scrontab(cfg)
         if find_block(current):
             write_scrontab(cfg, strip_block(current))
             done.append("scrontab entry removed")
-    except ScheduleError:
-        pass
+    except ToolMissing:
+        missing += 1
+    except ScheduleError as exc:
+        failed.append("scrontab: %s" % exc)
     try:
         if chain_jobs(cfg):
             user = os.environ.get("USER") or ""
             cmd = ["scancel", "--name=" + JOB_NAME] + (["-u", user] if user else [])
-            _run(cmd)
+            proc = _run(cmd)
+            if proc.returncode != 0:
+                raise ScheduleError((proc.stderr or proc.stdout).strip() or "scancel failed")
             done.append("chain job(s) cancelled")
-    except ScheduleError:
-        pass
+    except ToolMissing:
+        missing += 1
+    except ScheduleError as exc:
+        failed.append("chain: %s" % exc)
+    if missing == 2:
+        failed.append("neither scrontab nor squeue was found")
+    if failed:
+        raise ScheduleError(
+            "; ".join(failed) + (" (done before that: %s)" % "; ".join(done) if done else "")
+        )
     return done
 
 

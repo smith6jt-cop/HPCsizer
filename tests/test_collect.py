@@ -169,6 +169,32 @@ class TestNothingIsLost:
         assert since_of(resumed[0]) <= NOW - 3 * DAY
         assert len(resumed) >= 2, "a long catch-up is sliced"
 
+    def test_since_cannot_skip_what_is_still_owed(self, cfg, stubs):
+        """After a 60-day outage, `--since 1d` must not move the watermark past the gap.
+
+        The watermark becomes "now" at the end of every run. A window starting
+        later than the last success would leave jobs that no later run asks for
+        again -- not even the weekly 35-day pass.
+        """
+        stubs.sacct_default(simple_job(1))
+        run(cfg)
+        first = len(stubs.sacct_calls())
+        messages = []
+        later = NOW + 60 * DAY
+        run(cfg, now=later, since_ts=later - DAY, log=messages.append)
+        calls = stubs.sacct_calls()[first:]
+        assert since_of(calls[0]) == NOW - 3 * DAY, "from the last success, not from --since"
+        assert any("nothing in between is skipped" in m for m in messages)
+        with db.reader(cfg.db_path) as conn:
+            assert db.get_meta_int(conn, "watermark_ts") == later
+
+    def test_since_can_reach_further_back_than_the_last_success(self, cfg, stubs):
+        stubs.sacct_default(simple_job(1))
+        run(cfg)
+        first = len(stubs.sacct_calls())
+        run(cfg, now=NOW + DAY, since_ts=NOW - 100 * DAY)
+        assert since_of(stubs.sacct_calls()[first]) == NOW - 100 * DAY
+
     def test_completion_that_reaches_the_database_late_is_still_collected(self, cfg, stubs):
         """A job that ended before a harvest but was still shown as RUNNING by it."""
         late = simple_job(9, submit=NOW - 2 * 3600, elapsed=600)  # ended ~1.8 h before NOW

@@ -1,5 +1,7 @@
 """Tests for lib/schedule.py: the scrontab entry and the single-job chain."""
 
+import os
+
 import pytest
 from conftest import SCRONTAB_STUB
 
@@ -93,15 +95,39 @@ class TestScrontabInstall:
             schedule.install(sched)
 
 
+ENV_RECORDER = r"""#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$STUB_DIR/calls"
+printf 'ROOT=%s\nOPTS=%s\n' "${HPCSIZER_ROOT:-}" "${HPCSIZER_SBATCH_OPTS:-}" > "$STUB_DIR/sbatch.env"
+echo 4242
+"""
+
+
 class TestChain:
     def test_one_job_with_singleton_dependency(self, sched, stubs):
         stubs.output("sbatch", "4242\n")
         assert "4242" in schedule.install(sched, "hour", mode="chain")
         (call,) = stubs.calls("sbatch")
         assert "--dependency=singleton" in call and "--job-name=hpcsizer-harvest" in call
-        assert "HPCSIZER_ROOT=%s" % sched.root in call
+        assert "--export=ALL" in call
         assert call.endswith("bin/harvest.sh --chain 1hour")
         assert "watchdog" not in call
+
+    def test_successors_inherit_the_root_and_the_sbatch_options(self, sched, stubs):
+        """Each run queues the next from the node, without reading the configuration.
+
+        Without this the second job of a chain had no account, time limit or
+        output setting: only the first was submitted with them.
+        """
+        stubs.install("sbatch", ENV_RECORDER)
+        schedule.install(sched, "hour", mode="chain")
+        env = dict(
+            line.split("=", 1) for line in (stubs.dir / "sbatch.env").read_text().splitlines()
+        )
+        assert env["ROOT"] == sched.root
+        for option in ("--account=maigan", "--qos=maigan", "--time=00:20:00", "--mem=1gb",
+                       "--output=/dev/null", "--mail-type=FAIL"):  # fmt: skip
+            assert option in env["OPTS"].split()
+        assert schedule.chain_environment(sched)["PATH"] == os.environ["PATH"]
 
     def test_refuses_a_second_chain(self, sched, stubs):
         stubs.output("squeue", "4242 PENDING\n")
@@ -114,6 +140,59 @@ class TestChain:
         stubs.output("squeue", "4242 PENDING\n")
         assert schedule.remove(sched) == ["chain job(s) cancelled"]
         assert any("--name=hpcsizer-harvest" in c for c in stubs.calls("scancel"))
+
+
+class TestRemoveReportsFailures:
+    def test_failed_cancellation_is_an_error_not_a_success(self, sched, stubs):
+        """Saying "removed" while the chain keeps resubmitting itself would be worse than failing."""
+        (stubs.dir / "scrontab.table").write_text("@daily /home/u/mine.sh\n")
+        schedule.install(sched, "hour")
+        stubs.output("squeue", "4242 PENDING\n")
+        stubs.install("scancel", '#!/bin/bash\necho "scancel: error: Invalid job id" >&2\nexit 1\n')
+        with pytest.raises(schedule.ScheduleError) as err:
+            schedule.remove(sched)
+        assert "chain: scancel: error: Invalid job id" in str(err.value)
+        assert "done before that: scrontab entry removed" in str(err.value), "both are attempted"
+        assert schedule.BEGIN not in stubs.scrontab_table()
+
+    def test_failed_scrontab_update_is_an_error_and_the_chain_is_still_cancelled(
+        self, sched, stubs
+    ):
+        schedule.install(sched, "hour")
+        table = stubs.scrontab_table()
+        stubs.install(
+            "scrontab",
+            '#!/bin/bash\nif [[ "$1" == "-l" ]]; then cat "$STUB_DIR/scrontab.table"; exit 0; fi\n'
+            'echo "scrontab: error: slurmctld is down" >&2; exit 1\n',
+        )
+        stubs.output("squeue", "4242 RUNNING\n")
+        with pytest.raises(schedule.ScheduleError) as err:
+            schedule.remove(sched)
+        assert "scrontab: scrontab: error: slurmctld is down" in str(err.value)
+        assert "chain job(s) cancelled" in str(err.value)
+        assert stubs.scrontab_table() == table and stubs.calls("scancel")
+
+    def test_a_cluster_without_scrontab_is_not_a_failure(self, sched, stubs):
+        stubs.remove("scrontab")
+        stubs.output("squeue", "4242 PENDING\n")
+        assert schedule.remove(sched) == ["chain job(s) cancelled"]
+
+    def test_nothing_scheduled(self, sched, stubs):
+        assert schedule.remove(sched) == []
+
+    def test_no_slurm_at_all(self, cfg, stubs):
+        cfg.scrontab = "no-such-scrontab"
+        cfg.squeue = "no-such-squeue"
+        with pytest.raises(schedule.ScheduleError, match="neither scrontab nor squeue"):
+            schedule.remove(cfg)
+
+    def test_command_line_exit_status(self, sched, stubs, capsys):
+        from lib import cli
+
+        stubs.output("squeue", "4242 PENDING\n")
+        stubs.returncode("scancel", 1)
+        assert cli.main(["schedule", "remove"]) == 1
+        assert "hpg schedule:" in capsys.readouterr().err
 
 
 def test_describe_without_slurm(cfg, stubs):

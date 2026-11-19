@@ -128,6 +128,21 @@ class TestChainMode:
         assert "BEFORE_LOGDIR" in calls, "the successor must be queued before logs/ is created"
         assert not any("watchdog" in c for c in calls)
 
+    def test_successor_is_submitted_with_the_options_it_inherited(self, site, stubs):
+        """`hpg schedule install --mode chain` hands the options to the first job's
+        environment; every run passes them on, and --export=ALL keeps them alive."""
+        stubs.sacct_default(recent(1))
+        env = dict(
+            os.environ,
+            HPCSIZER_SBATCH_OPTS="--job-name=hpcsizer-harvest --account=mygroup --time=00:20:00 "
+            "--mem=1gb --output=/dev/null --error=/dev/null --mail-type=FAIL",
+        )
+        assert launch("--chain", "1hour", env=env).returncode == 0
+        (submit,) = stubs.calls("sbatch")
+        for option in ("--account=mygroup", "--time=00:20:00", "--mem=1gb", "--output=/dev/null",
+                       "--mail-type=FAIL", "--export=ALL"):  # fmt: skip
+            assert option in submit.split()
+
     def test_does_not_queue_a_second_successor(self, site, stubs):
         """A duplicate chain collapses: the extra run finds a successor and adds none."""
         stubs.output("squeue", "4242\n")

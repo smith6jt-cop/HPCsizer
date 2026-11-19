@@ -231,6 +231,22 @@ echo done
 """
 
 
+def sampler_running(spool):
+    """Is a sampler writing to this spool still alive? (Read from /proc: no pgrep needed.)"""
+    needle = ("--spool %s" % spool).encode()
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % name, "rb") as handle:
+                command = handle.read().replace(b"\0", b" ")
+        except OSError:
+            continue
+        if b"monitor.py" in command and needle in command:
+            return True
+    return False
+
+
 class TestAsAProcess:
     def run_job(self, tmp_path, spool, env=None):
         script = tmp_path / "job.sh"
@@ -253,16 +269,9 @@ class TestAsAProcess:
         assert took < 4, "the script's own `wait` must not wait for the sampler"
         series = spool / "4242.c1.tsv"
         deadline = time.time() + 10
-        while (
-            time.time() < deadline
-            and subprocess.run(
-                ["pgrep", "-f", "monitor.py --spool %s" % spool], stdout=subprocess.PIPE
-            ).stdout
-        ):
+        while time.time() < deadline and sampler_running(spool):
             time.sleep(0.2)
-        assert not subprocess.run(
-            ["pgrep", "-f", "monitor.py --spool %s" % spool], stdout=subprocess.PIPE
-        ).stdout, "the sampler ends with the job script"
+        assert not sampler_running(spool), "the sampler ends with the job script"
         assert oct(series.stat().st_mode & 0o777) == "0o640"
         meta, rows = profile.read_series(str(series))
         assert meta["job"] == "4242" and meta["node"] == "c1" and meta["source"] == "proc"

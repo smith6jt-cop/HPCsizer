@@ -187,16 +187,26 @@ def harvest(
         if watermark is not None and watermark > now:
             watermark = now  # a clock that ran ahead must not create a gap
 
-        if since_ts is not None:
-            start = int(since_ts)
-        elif watermark is None:
-            start = now - int(cfg.first_days * DAY)
-            log("[harvest] first harvest: reading the last %g days" % cfg.first_days)
+        if watermark is None:
+            start = now - int(cfg.first_days * DAY) if since_ts is None else int(since_ts)
+            if since_ts is None:
+                log("[harvest] first harvest: reading the last %g days" % cfg.first_days)
         else:
+            # Everything since the last success is owed, whatever --since says:
+            # the watermark moves to now at the end of this run, and a window
+            # that started later would leave a gap no later run asks for again.
             start = watermark - overlap
             due = last_deep is None or now - last_deep >= cfg.deep_every_days * DAY
             if deep or due:
                 start = min(start, now - int(cfg.deep_days * DAY))
+            if since_ts is not None:
+                if int(since_ts) > start:
+                    log(
+                        "[harvest] --since is later than the last successful harvest; "
+                        "reading from %sZ so that nothing in between is skipped"
+                        % slurm.utc_stamp(start)
+                    )
+                start = min(start, int(since_ts))
         if start <= now - int(cfg.deep_days * DAY):
             deep = True
         stats["window_start_ts"] = start

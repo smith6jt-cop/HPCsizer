@@ -189,6 +189,7 @@ MONITOR_COLUMNS = (
     "gpu_mem_max_bytes",
     "oom_kills",
     "top_comm",
+    "coverage",
     "summary_json",
     "series_path",
 )
@@ -323,6 +324,7 @@ CREATE TABLE IF NOT EXISTS job_monitor (
     gpu_mem_max_bytes INTEGER,
     oom_kills       INTEGER,
     top_comm        TEXT,
+    coverage        REAL,               -- share of the job's run time the samples span
     summary_json    TEXT,
     series_path     TEXT,
     ingested_ts     INTEGER
@@ -878,12 +880,33 @@ def upsert_context(
 
 
 def latest_job_pk(conn: sqlite3.Connection, job_id_raw: int) -> Optional[sqlite3.Row]:
-    """Most recent stored incarnation of a raw job id (id, user, submit_ts)."""
+    """Most recent stored incarnation of a raw job id, with what profile ingestion needs."""
     return conn.execute(
-        'SELECT id, "user", submit_ts, end_ts FROM jobs WHERE job_id_raw=? '
-        "ORDER BY submit_ts DESC LIMIT 1",
+        'SELECT id, "user", job_id, submit_ts, start_ts, end_ts, elapsed_sec, alloc_cpus, state '
+        "FROM jobs WHERE job_id_raw=? ORDER BY submit_ts DESC LIMIT 1",
         (int(job_id_raw),),
     ).fetchone()
+
+
+def jobs_of_submission(conn: sqlite3.Connection, job_id: int) -> List[sqlite3.Row]:
+    """Stored jobs one sbatch call produced: the job itself, or every task of an array."""
+    return conn.execute(
+        'SELECT id, "user", job_id, submit_ts, end_ts FROM jobs '
+        "WHERE job_id_raw=? OR array_job_id=? ORDER BY submit_ts DESC, id",
+        (int(job_id), int(job_id)),
+    ).fetchall()
+
+
+def has_monitor(conn: sqlite3.Connection, job_pk: int) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM job_monitor WHERE job_pk=?", (job_pk,)).fetchone() is not None
+    )
+
+
+def has_context(conn: sqlite3.Connection, job_pk: int) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM job_context WHERE job_pk=?", (job_pk,)).fetchone() is not None
+    )
 
 
 # ---------------------------------------------------------------------------

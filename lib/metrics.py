@@ -51,6 +51,7 @@ CPU_MIN_ELAPSED_SEC = 300
 TIME_OVERREQUEST_RATIO = 0.25
 TIME_MIN_LIMIT_MIN = 60
 GPU_IDLE_PERCENT = 5.0
+PROFILE_COVERAGE = 0.9
 
 _KILLED = frozenset({"TIMEOUT", "CANCELLED", "NODE_FAIL", "PREEMPTED", "OUT_OF_MEMORY", "DEADLINE"})
 
@@ -97,16 +98,24 @@ def job_metrics(
     elapsed = job.get("elapsed_sec") or 0
     elapsed_h = elapsed / 3600.0
 
+    # A profile is the whole truth when it read the job's cgroup for (nearly)
+    # the whole run. Otherwise it is one more lower bound, like accounting, and
+    # the larger of the two is used.
+    trusted = (
+        str(job.get("mon_source") or "").startswith("cgroup")
+        and (job.get("mon_coverage") or 0) >= PROFILE_COVERAGE
+    )
+
     # -- memory --------------------------------------------------------------
     req_mem_mb = job.get("req_mem_mb")
     mem_req_gb = req_mem_mb / MIB_PER_GIB if req_mem_mb else None
     mem_used_gb: Optional[float] = None
     mem_source: Optional[str] = None
     monitor_peak = job.get("mon_peak_mem_bytes")
-    sacct_peak = job.get("peak_mem_bytes")
-    if monitor_peak:
+    sacct_peak = job.get("peak_mem_bytes") if elapsed >= 2 * cfg.acct_sample_sec else None
+    if monitor_peak and (trusted or not sacct_peak or monitor_peak >= sacct_peak):
         mem_used_gb, mem_source = monitor_peak / GIB, "profile"
-    elif sacct_peak and elapsed >= 2 * cfg.acct_sample_sec:
+    elif sacct_peak:
         mem_used_gb, mem_source = sacct_peak / GIB, "sacct"
     mem_eff = mem_used_gb / mem_req_gb if mem_used_gb is not None and mem_req_gb else None
 
@@ -114,13 +123,14 @@ def job_metrics(
     cores_alloc = job.get("alloc_cpus") or job.get("req_cpus") or None
     cpu_sec: Optional[float] = None
     cpu_source: Optional[str] = None
-    if job.get("mon_cpu_sec") is not None:
-        cpu_sec, cpu_source = job["mon_cpu_sec"], "profile"
-    elif job.get("cpu_sec") is not None:
-        killed = state in _KILLED
-        polled = job.get("cpu_src") in ("polled", "mixed")
-        if not killed or polled:
-            cpu_sec, cpu_source = job["cpu_sec"], job.get("cpu_src") or "rusage"
+    sacct_cpu = job.get("cpu_sec")
+    if sacct_cpu is not None and state in _KILLED and job.get("cpu_src") not in ("polled", "mixed"):
+        sacct_cpu = None  # rusage of a step Slurm killed: near zero whatever it did
+    monitor_cpu = job.get("mon_cpu_sec")
+    if monitor_cpu is not None and (trusted or sacct_cpu is None or monitor_cpu >= sacct_cpu):
+        cpu_sec, cpu_source = monitor_cpu, "profile"
+    elif sacct_cpu is not None:
+        cpu_sec, cpu_source = sacct_cpu, job.get("cpu_src") or "rusage"
     cores_used = cpu_sec / elapsed if cpu_sec is not None and elapsed >= 60 else None
     cores_peak = job.get("mon_max_cores")
     cores_p95 = job.get("mon_p95_cores")

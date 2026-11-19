@@ -24,17 +24,17 @@ from lib import (
     history,
     jobview,
     metrics,
+    plotter,
+    profile,
     queue,
     recommender,
     report,
     sbatch_opts,
     schedule,
+    submit,
 )
 from lib.config import Config, load_config
 from lib.fmt import fmt_age, fmt_bytes, fmt_int, fmt_ts
-
-# Commands still served by the version 2 implementation until they are replaced.
-LEGACY_COMMANDS = ("submit", "interactive", "plot")
 
 # Commands whose trailing arguments are sbatch's, passed through untouched:
 # hpg's own options come first, and everything from the first other word on is
@@ -45,7 +45,12 @@ PASS_THROUGH: Dict[str, Tuple[frozenset, frozenset]] = {
         frozenset({"--json", "--no-refresh", "-h", "--help"}),
         frozenset({"--user", "--days", "--name", "--like", "--kind"}),
     ),
+    "submit": (
+        frozenset({"--apply", "--as-is", "--yes", "-y", "--no-profile", "-h", "--help"}),
+        frozenset(),
+    ),
 }
+PASS_THROUGH["sbatch"] = PASS_THROUGH["submit"]
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -91,12 +96,8 @@ def data_line(watermark_ts: Optional[int], now: int, refresh: str = "") -> str:
 
 
 def _ingest_hook():
-    """The spool ingester, when the profiler module is present."""
-    try:
-        from lib import profile
-    except ImportError:
-        return None
-    return getattr(profile, "ingest_spool", None)
+    """What a harvest also does: store the in-job profiles of the jobs that finished."""
+    return profile.ingest_spool
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +482,75 @@ def cmd_backtest(args: argparse.Namespace, cfg: Config) -> int:
 
 
 # ---------------------------------------------------------------------------
+# submit
+# ---------------------------------------------------------------------------
+
+SUBMIT_EPILOG = """\
+examples:
+  hpg submit job.sh                      report, then submit as written, profiled
+  hpg submit --apply job.sh              submit with the request its history supports
+  hpg submit --apply --yes -c 16 job.sh  the same without asking, from a script
+  hpg submit --as-is --wrap "python x.py"   no report: just submit and profile
+  jid=$(hpg submit --parsable job.sh)    sbatch's output and exit status are unchanged
+
+The report is written to standard error. Nothing in your script file is changed.
+"""
+
+
+def cmd_submit(args: argparse.Namespace, cfg: Config) -> int:
+    sbatch_args = list(args.sbatch_args)
+    if not sbatch_args:
+        _err("hpg submit: nothing to submit; give what you would give sbatch (see --help)")
+        return EXIT_USAGE
+    if args.apply and args.as_is:
+        _err("hpg submit: --apply and --as-is exclude each other")
+        return EXIT_USAGE
+    user = current_user()
+    mode = "as-is" if args.as_is else ("apply" if args.apply else "advise")
+    rec: Optional[Dict[str, Any]] = None
+
+    parsed = sbatch_opts.parse_argv(sbatch_args)
+    if mode != "as-is" and submit.passes_straight_through(parsed) is None:
+        now = int(time.time())
+        try:
+            sub = analyzer.analyze_submission(sbatch_args, roots=cfg.data_roots)
+            jobs, info = history.load(cfg, since_ts=now - int(cfg.lookback_days * history.DAY))
+            target = recommender.target_from_submission(sub, user, cfg)
+            rec = recommender.recommend(target, history.History(jobs), cfg, now)
+            if rec["source"] == recommender.SOURCE_NONE:
+                _err(
+                    "hpg: no finished runs of %s yet; nothing to compare with."
+                    % target.cls["family"]
+                )
+            else:
+                _err(recommender.render_text(rec))
+                _err(data_line(info["watermark_ts"], now))
+        except OSError:
+            pass  # an unreadable script: sbatch reports that better than this could
+        except db.DatabaseError as exc:
+            _err("hpg submit: no report (%s)" % exc)
+
+    changes: Dict[str, str] = {}
+    if mode == "apply":
+        changes, _blockers = submit.split_changes(rec)
+        if changes and not args.yes and submit.interactive():
+            answer = submit.ask(
+                "Submit with %s? [Y]es / [n]o, as requested / [q]uit: " % " ".join(changes.values())
+            )
+            if answer in ("q", "quit"):
+                _err("Not submitted.")
+                return EXIT_ERROR
+            if answer in ("n", "no"):
+                changes = {}
+
+    plan = submit.prepare(sbatch_args, cfg, profile=not args.no_profile, changes=changes)
+    plan.recommendation = rec
+    for line in submit.describe(plan, rec, mode):
+        _err(line)
+    return submit.run_sbatch(cfg, plan, user)
+
+
+# ---------------------------------------------------------------------------
 # Reports
 # ---------------------------------------------------------------------------
 
@@ -679,6 +749,34 @@ def cmd_job(args: argparse.Namespace, cfg: Config) -> int:
     return EXIT_OK
 
 
+def cmd_plot(args: argparse.Namespace, cfg: Config) -> int:
+    with db.reader(cfg.db_path) as conn:
+        found = db.find_jobs(conn, args.job_id)
+    if not found:
+        _err("hpg plot: no stored job %s" % args.job_id)
+        return EXIT_NO_DATA
+    job = history.annotate(found[:1], cfg)[0]
+    paths = profile.series_files(cfg, job)
+    if not paths:
+        _err(
+            "hpg plot: job %s has no profile; jobs submitted with 'hpg submit' record one"
+            % args.job_id
+        )
+        return EXIT_NO_DATA
+    if not plotter.available():
+        _err(plotter.MISSING)
+        for path in paths:
+            _err("  " + path)
+        return EXIT_ERROR
+    try:
+        out = plotter.plot_job(job, plotter.load(paths), args.out or plotter.default_name(job))
+    except (plotter.PlotError, OSError) as exc:
+        _err("hpg plot: %s" % exc)
+        return EXIT_ERROR
+    print(out)
+    return EXIT_OK
+
+
 def cmd_export(args: argparse.Namespace, cfg: Config) -> int:
     now = int(time.time())
     days = args.days or cfg.lookback_days
@@ -788,6 +886,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
     p.set_defaults(func=cmd_recommend, sbatch_args=[])
 
+    p = sub.add_parser(
+        "submit",
+        aliases=["sbatch"],
+        help="sbatch with a report first and a sampler inside the job",
+        usage="hpg submit [--apply | --as-is] [--yes] [--no-profile] SBATCH-ARGS",
+        description="Submit a job as sbatch would. Before submitting, compare the request "
+        "with what earlier runs of the same job used; inside the job, record what it uses. "
+        "hpg's own options come first; everything after them goes to sbatch.",
+        epilog=SUBMIT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help="submit with the memory, CPUs and time its own history supports",
+    )
+    p.add_argument("--as-is", action="store_true", help="no report; submit as written (profiled)")
+    p.add_argument("-y", "--yes", action="store_true", help="with --apply: do not ask")
+    p.add_argument("--no-profile", action="store_true", help="do not add the in-job sampler")
+    p.set_defaults(func=cmd_submit, sbatch_args=[])
+
     def reading(p: argparse.ArgumentParser, days: Optional[float]) -> None:
         """Options shared by the commands that read stored jobs."""
         p.add_argument("--user", help="only this user's jobs")
@@ -859,6 +978,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
     p.set_defaults(func=cmd_job)
 
+    p = sub.add_parser("plot", help="time series of a profiled job as a PNG (needs matplotlib)")
+    p.add_argument("job_id", help="job id as Slurm prints it")
+    p.add_argument("--out", metavar="FILE", help="where to write (default: hpg-job-ID.png here)")
+    p.set_defaults(func=cmd_plot)
+
     p = sub.add_parser("export", help="one line per job, stored and derived values, as CSV or JSON")
     reading(p, None)
     p.add_argument("--kind", help="only jobs of this kind")
@@ -903,15 +1027,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in LEGACY_COMMANDS:
-        from lib import legacy_cli
-
-        try:
-            legacy_cli.cli.main(args=argv, prog_name="hpg", standalone_mode=False)
-        except SystemExit as exc:
-            return int(exc.code or 0)
-        return EXIT_OK
-
     passed_through: List[str] = []
     if argv and argv[0] in PASS_THROUGH:
         own, passed_through = split_passthrough(argv[0], argv[1:])

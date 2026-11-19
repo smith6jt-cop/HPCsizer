@@ -1,5 +1,6 @@
 """Tests for hpg status and hpg preflight."""
 
+import os
 import sqlite3
 
 from conftest import SCRONTAB_STUB
@@ -148,3 +149,21 @@ class TestPreflight:
         assert checks["compute node"]["status"] == "PASS"
         assert "cgroup v2" in checks["compute node"]["detail"]
         assert "--account=maigan" in stubs.calls("srun")[0]
+
+
+class TestCodePermissions:
+    def test_code_that_others_can_change_is_called_out(self, cfg, stubs, root):
+        """A profiled job runs bin/monitor.py as its submitter: nobody else may edit it."""
+        (root / "bin").mkdir()
+        sampler = root / "bin" / "monitor.py"
+        sampler.write_text("# sampler\n")
+        os.chmod(str(root), 0o750)
+        os.chmod(str(root / "bin"), 0o750)
+        sampler.chmod(0o640)
+        assert health.writable_by_others(cfg) == []
+        sampler.chmod(0o664)
+        os.chmod(str(root / "bin"), 0o770)
+        assert health.writable_by_others(cfg) == [str(root / "bin"), str(sampler)]
+        os.makedirs(cfg.spool_dir)
+        st = health.status(cfg, with_sacct=False)
+        assert any("writable by others" in problem for problem in st["problems"])

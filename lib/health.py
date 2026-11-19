@@ -29,15 +29,34 @@ def spool_state(cfg: Config) -> Dict[str, Any]:
     path = cfg.spool_dir
     info: Dict[str, Any] = {"path": path, "exists": os.path.isdir(path)}
     if not info["exists"]:
-        info["note"] = "in-job profiles are disabled until it exists"
+        info["note"] = "created by the first harvest; until then jobs are not profiled"
         return info
     mode = os.stat(path).st_mode
     info["mode"] = stat.filemode(mode)
     info["writable"] = os.access(path, os.W_OK)
     info["shared"] = bool(mode & stat.S_IWGRP) and bool(mode & stat.S_ISVTX)
     if not info["shared"]:
-        info["note"] = "only your own jobs can be profiled (for the group: chmod 3770)"
+        info["note"] = "only its owner's jobs can be profiled (for the group: chmod 3770)"
     return info
+
+
+def writable_by_others(cfg: Config) -> List[str]:
+    """Code that other members' jobs execute and that someone other than its owner can change.
+
+    A profiled job runs ``bin/monitor.py`` as the user who submitted it. If the
+    file, or a directory on the way to it, is group- or world-writable, any
+    member could change what runs inside everyone's jobs.
+    """
+    risky = []
+    for rel in ("", "bin", os.path.join("bin", "monitor.py"), "lib"):
+        path = os.path.join(cfg.root, rel) if rel else cfg.root
+        try:
+            mode = os.stat(path).st_mode
+        except OSError:
+            continue
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            risky.append(path)
+    return risky
 
 
 def status(cfg: Config, now: Optional[int] = None, with_sacct: bool = True) -> Dict[str, Any]:
@@ -112,6 +131,12 @@ def status(cfg: Config, now: Optional[int] = None, with_sacct: bool = True) -> D
     if out["schedule"]["mode"] == "none":
         problems.append("no scheduled harvest: run 'hpg schedule install'")
     out["spool"] = spool_state(cfg)
+    risky = writable_by_others(cfg)
+    if risky and out["spool"].get("exists"):
+        problems.append(
+            "writable by others, yet run inside members' profiled jobs: %s (chmod go-w)"
+            % ", ".join(risky)
+        )
     out["ok"] = out.get("state") == "ok" and not out.get("coverage", {}).get("missing")
     return out
 
@@ -335,6 +360,17 @@ def preflight(
         )
     else:
         checks.append(_check("scrontab answers", WARN, (err or out).strip() or "scrontab failed"))
+
+    risky = writable_by_others(cfg)
+    checks.append(
+        _check(
+            "code permissions",
+            WARN if risky else PASS,
+            "writable by others, yet run inside members' jobs: %s (chmod go-w)" % ", ".join(risky)
+            if risky
+            else "the sampler and the code are writable by their owner only",
+        )
+    )
 
     spool = spool_state(cfg)
     checks.append(

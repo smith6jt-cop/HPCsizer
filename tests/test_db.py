@@ -369,13 +369,14 @@ class TestMigrateV2:
         with pytest.raises(db.DatabaseError):
             db.migrate_v2(dbfile, str(tmp_path / "backup"))
 
-    def test_real_v2_code_path(self, tmp_path):
-        """A database written by the v2 module itself migrates."""
-        from lib import legacy_db
+    def test_database_with_the_full_version_2_schema(self, tmp_path):
+        """Every column version 2 created, written the way version 2 wrote."""
+        import v2_schema
 
         path = str(tmp_path / "profiles.db")
-        legacy_db.init_db(path)
-        legacy_db.insert_job(
+        v2_schema.create(path)
+        v2_schema.insert_job(
+            path,
             {
                 "job_id": "9001",
                 "user": "smith6jt",
@@ -390,7 +391,6 @@ class TestMigrateV2:
                 "sacct_cpu_time_sec": 0,
                 "flags": "[]",
             },
-            db_path=path,
         )
         stats = db.migrate_v2(path, str(tmp_path / "backup"))
         assert stats["migrated"] == 1

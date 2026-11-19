@@ -17,6 +17,7 @@ from lib.fmt import (
     fmt_ts,
     table,
 )
+from lib.profile import describe as describe_profile
 
 MEM_SOURCE_TEXT = {
     "step": "largest step",
@@ -548,7 +549,7 @@ def render_job(
         )
         if job.get("mon_top_comm"):
             lines.append("  largest processes: %s" % job["mon_top_comm"])
-        for note in (profile or {}).get("notes", []):
+        for note in describe_profile(profile or {}):
             lines.append("  - %s" % note)
         if job.get("mon_series_path"):
             lines.append("  time series: hpg plot %s" % job.get("job_id"))

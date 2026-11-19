@@ -85,6 +85,12 @@ class Config:
     session_names: List[str] = field(default_factory=lambda: ["vscode"])
     generic_names: List[str] = field(default_factory=lambda: list(DEFAULT_GENERIC_NAMES))
 
+    # In-job sampler: also read perf counters of the busiest process every 5 minutes
+    profile_perf: bool = False
+    # Mode the spool is created with: group-writable, setgid and sticky, so that
+    # every member's jobs can add files and nobody can remove another's.
+    spool_mode: int = 0o3770
+
     # File systems searched for a job's input data when a script is analysed
     data_roots: List[str] = field(default_factory=lambda: list(DEFAULT_DATA_ROOTS))
 
@@ -215,6 +221,10 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
             setattr(cfg, key, _split(raw))
     if get("paths", "data_roots"):
         cfg.data_roots = _split(get("paths", "data_roots"))
+    if get("profile", "perf"):
+        cfg.profile_perf = get("profile", "perf").lower() in ("1", "yes", "true", "on")
+    if get("profile", "spool_mode"):
+        cfg.spool_mode = int(get("profile", "spool_mode"), 8)
 
     # Kept from the previous harvester so existing overrides (and the test
     # suite, which zeroes the backoff) continue to work.

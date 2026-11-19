@@ -158,3 +158,52 @@ class TestFlags:
     def test_sessions_are_still_flagged_for_memory(self, conf):
         m = job_metrics(job(req_mem_mb=512 * 1024, peak_mem_bytes=34 * GIB), conf, session=True)
         assert "mem_overrequest" in m["flags"]
+
+
+class TestProfileAgainstAccounting:
+    def test_cgroup_profile_of_the_whole_run_is_believed(self, conf):
+        """Accounting's sum over steps can only overestimate; the cgroup figure is the job."""
+        m = job_metrics(
+            job(
+                peak_mem_bytes=30 * GIB,
+                cpu_sec=5 * 3600.0,
+                mon_source="cgroup-v2",
+                mon_coverage=0.99,
+                mon_peak_mem_bytes=12 * GIB,
+                mon_cpu_sec=4 * 3600.0,
+            ),
+            conf,
+        )
+        assert m["mem_used_gb"] == 12 and m["mem_source"] == "profile"
+        assert m["cores_used"] == 4 and m["cpu_source"] == "profile"
+
+    def test_partial_or_process_tree_profile_is_only_a_lower_bound(self, conf):
+        for extra in (
+            {"mon_source": "cgroup-v2", "mon_coverage": 0.4},
+            {"mon_source": "proc", "mon_coverage": 1.0},
+        ):
+            m = job_metrics(
+                job(
+                    peak_mem_bytes=30 * GIB,
+                    cpu_sec=5 * 3600.0,
+                    mon_peak_mem_bytes=12 * GIB,
+                    mon_cpu_sec=4 * 3600.0,
+                    **extra,
+                ),
+                conf,
+            )
+            assert m["mem_used_gb"] == 30 and m["mem_source"] == "sacct"
+            assert m["cores_used"] == 5 and m["cpu_source"] == "rusage"
+
+    def test_the_larger_of_two_lower_bounds(self, conf):
+        m = job_metrics(
+            job(
+                peak_mem_bytes=8 * GIB,
+                mon_source="proc",
+                mon_peak_mem_bytes=12 * GIB,
+                mon_cpu_sec=3600.0,
+            ),
+            conf,
+        )
+        assert m["mem_used_gb"] == 12 and m["mem_source"] == "profile"
+        assert m["cores_used"] == 2 and m["cpu_source"] == "rusage"

@@ -28,8 +28,7 @@ mail_type = FAIL
 
 [paths]
 # db = /blue/mygroup/hpc-sizer/profiles.db
-# The spool must be writable by every member whose jobs are profiled:
-#   mkdir -p <spool>/submit && chmod 3770 <spool> <spool>/submit
+# Where running jobs write their profiles (see [profile] for its permissions).
 # spool = /blue/mygroup/hpc-sizer/spool
 # logs = /blue/mygroup/hpc-sizer/logs
 # timeseries = /blue/mygroup/hpc-sizer/timeseries
@@ -54,6 +53,17 @@ stale_hours = 26
 session_names = vscode
 # Names that say nothing about what ran; grouped by program instead.
 # generic_names = wrap, sbatch, bash, sh, python, python3, rscript, r, job, run, test, tmp, script, interactive, a.out
+
+[profile]
+# Jobs submitted with `hpg submit` run a sampler that records memory, CPU, I/O
+# and GPU use every 10 to 60 seconds. With perf = yes it also reads hardware
+# counters of the busiest process every five minutes (needs `perf` on the
+# compute nodes and kernel.perf_event_paranoid <= 2).
+perf = no
+# The spool is created by the first harvest with this mode: writable by the
+# group (so members' jobs can record profiles), setgid and sticky. Use 0700 to
+# profile only your own jobs.
+# spool_mode = 3770
 
 [measurement]
 # slurmd's task sampling interval (JobAcctGatherFrequency task=).

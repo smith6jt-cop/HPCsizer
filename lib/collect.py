@@ -256,7 +256,7 @@ def harvest(
 
     log(
         "[harvest] %s: %d records since %s -> %d new, %d updated, %d still open, "
-        "%d internal, %d unparsed, %d late, %d user(s)%s"
+        "%d internal, %d unparsed, %d late, %d user(s)%s%s"
         % (
             time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
             stats["n_records"],
@@ -268,6 +268,7 @@ def harvest(
             stats["n_unparsed"],
             stats["n_late"],
             stats["n_users"],
+            ", %d profile(s)" % stats["n_profiles"] if stats["n_profiles"] else "",
             " (deep pass)" if deep else "",
         )
     )

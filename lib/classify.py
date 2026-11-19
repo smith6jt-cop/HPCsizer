@@ -31,6 +31,9 @@ _OOD_MARK = "sys/dashboard/"
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _DIGITS_RE = re.compile(r"\d+")
 _SEPARATORS = ("&&", "||", ";", "|", "&")
+_BRACKETS = frozenset("(){}")
+# What `hpg submit` puts in front of a --wrap command to start the in-job sampler.
+SAMPLER_MARK = "HPCSIZER=sampler"
 
 # Launchers that only run something else; the program is what follows them.
 _PASS_THROUGH = frozenset(
@@ -74,10 +77,12 @@ def _segments(tokens: Sequence[str]) -> List[List[str]]:
             out.append([])
             continue
         trailing = tok.endswith(";") and len(tok) > 1
-        out[-1].append(tok.rstrip(";") if trailing else tok)
+        word = tok.rstrip(";") if trailing else tok
+        if word and not set(word) <= _BRACKETS:  # "(", ")" and "{" group commands, nothing more
+            out[-1].append(word)
         if trailing:
             out.append([])
-    return [seg for seg in out if seg]
+    return [seg for seg in out if seg and SAMPLER_MARK not in seg]
 
 
 def _skip_options(tokens: Sequence[str], i: int) -> int:

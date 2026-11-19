@@ -114,13 +114,12 @@ class TestStatus:
 
 class TestDb:
     def make_v2(self, root):
-        from lib import legacy_db
+        import v2_schema
 
         path = str(root / "profiles.db")
-        legacy_db.init_db(path)
-        legacy_db.insert_job(
-            {"job_id": "1", "user": "u", "job_name": "j", "state": "COMPLETED", "flags": "[]"},
-            db_path=path,
+        v2_schema.create(path)
+        v2_schema.insert_job(
+            path, {"job_id": "1", "user": "u", "job_name": "j", "state": "COMPLETED", "flags": "[]"}
         )
         return path
 
@@ -348,6 +347,8 @@ def test_no_command_prints_help(capsys):
     assert "COMMAND" in capsys.readouterr().out
 
 
-def test_refresh_hook_is_optional():
-    assert cli._ingest_hook() is None or callable(cli._ingest_hook())
+def test_a_harvest_also_ingests_profiles():
+    from lib import profile
+
+    assert cli._ingest_hook() is profile.ingest_spool
     assert collect.DAY == DAY

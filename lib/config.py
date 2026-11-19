@@ -88,7 +88,7 @@ class Config:
     # In-job sampler: also read perf counters of the busiest process every 5 minutes
     profile_perf: bool = False
     # In-job sampler: on a job with several nodes, also sample the other nodes
-    # (through one more srun step, which can compete with the job's own steps)
+    # (through one more srun step in the job)
     profile_multi_node: bool = False
     # Mode the spool is created with: group-writable, setgid and sticky, so that
     # every member's jobs can add files and nobody can remove another's.

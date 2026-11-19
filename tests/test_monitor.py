@@ -466,7 +466,7 @@ class TestSeveralNodes:
         return bool(called)
 
     def test_other_nodes_are_sampled_only_when_asked(self, tmp_path, monkeypatch):
-        """One more srun step can compete with the job's own steps: never by default."""
+        """One more srun step inside somebody's job: only when asked for."""
         assert self.once(tmp_path / "a", monkeypatch) is False
         assert self.once(tmp_path / "b", monkeypatch, "--fan-out") is True
         assert self.once(tmp_path / "c", monkeypatch, "--fan-out", "--no-fan-out") is False
@@ -481,7 +481,9 @@ class TestSeveralNodes:
         child = sampler.fan_out(args, {"SLURM_JOB_NUM_NODES": "3", "SLURMD_NODENAME": "c1"})
         assert child is not None and child.wait(timeout=10) == 0
         call = calls.read_text()
-        assert call.startswith("--overlap --nodes=3 --ntasks=3 --ntasks-per-node=1 --quiet ")
+        assert call.startswith(
+            "--overlap --mem=0 --nodes=3 --ntasks=3 --ntasks-per-node=1 --quiet "
+        )
         assert "monitor.py --spool /sp --no-fan-out --skip-node c1 --interval 5.0" in call
 
     def test_single_node_jobs_start_nothing(self):

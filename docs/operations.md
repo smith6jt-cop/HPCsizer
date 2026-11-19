@@ -351,14 +351,17 @@ cgroup version the compute nodes use.
 
 A job on several nodes is profiled on the node that runs its batch script.
 Such a profile is marked "profiled on 1 of N nodes" and counts as a lower
-bound for the job; accounting's per-step figures cover the other nodes. With
-`multi_node = yes` under `[profile]` the sampler starts one more sampler on
-each other node through `srun --overlap`; each writes its own file and the
-harvester combines them. That is one more job step. It is off by default
-because a step can compete with the job's own steps: on Slurm 23.11 a second
-step could not be created while another held the job's memory ("Memory
-required by task is not available"), in whichever order they started. Try it
-on a multi-node test job of your own before turning it on for the group.
+bound for the job; accounting's per-step figures cover the other nodes.
+
+With `multi_node = yes` under `[profile]` the sampler starts one more sampler
+on each other node through `srun --overlap --mem=0`; each writes its own file
+and the harvester combines them. That is one more step in the job, visible in
+its accounting. It is off by default because it has been tried on Slurm 23.11
+only, without cgroups: there the job's own `srun` steps ran unaffected whether
+they started before or after the sampler's step, for jobs requested with
+`--mem` and with `--mem-per-cpu`. Submit one multi-node test job of your own
+with the setting on (`hpg job ID` should then list every node) before turning
+it on for the group.
 
 Where no cgroup of the job is found (a cluster without the cgroup plugins) the
 sampler follows the batch script's process tree instead. That does not include

@@ -674,9 +674,14 @@ def fan_out(args, environ):
         return None
     if nodes < 2:
         return None
+    # --overlap lets the step share the job's CPUs with the job's own steps;
+    # --mem=0 makes it ask for no memory of its own. Without that, a step
+    # created after one of the job's own steps is refused in a job that was
+    # requested with --mem-per-cpu ("Memory required by task is not available").
     cmd = [
         "srun",
         "--overlap",
+        "--mem=0",
         "--nodes=%d" % nodes,
         "--ntasks=%d" % nodes,
         "--ntasks-per-node=1",
@@ -851,7 +856,7 @@ def build_parser():
         "--fan-out",
         action="store_true",
         help="on a job with several nodes, start a sampler on each other node with srun "
-        "(one more job step; off by default because a step can compete with the job's own)",
+        "(one more step in the job; off unless asked for)",
     )
     parser.add_argument("--no-fan-out", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-node", help=argparse.SUPPRESS)

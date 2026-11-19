@@ -1,0 +1,71 @@
+# HPCsizer configuration. Copy to hpcsizer.ini (same directory) and edit.
+#
+# Environment variables HPCSIZER_DB, HPCSIZER_ACCT, HPCSIZER_ROOT and
+# HPCSIZER_SPOOL override the matching keys here. The scheduled harvest runs
+# without your shell environment, so set the accounts in this file.
+
+[slurm]
+# Slurm account(s) whose jobs are collected, comma-separated.
+accounts = mygroup
+# Full paths are only needed when the commands are not on the default PATH.
+# sacct = /opt/slurm/bin/sacct
+# sbatch = /opt/slurm/bin/sbatch
+# squeue = /opt/slurm/bin/squeue
+# scrontab = /opt/slurm/bin/scrontab
+# Interpreter the in-job sampler is started with on compute nodes.
+# compute_python = /usr/bin/python3
+
+[schedule]
+# sbatch options for the scheduled harvest job.
+# account defaults to the single account above.
+# account = mygroup
+# qos = mygroup
+# partition = hpg-default
+time = 00:20:00
+mem = 1gb
+# mail_user = you@example.edu
+mail_type = FAIL
+
+[paths]
+# db = /blue/mygroup/hpc-sizer/profiles.db
+# The spool must be writable by every member whose jobs are profiled:
+#   mkdir -p <spool>/submit && chmod 3770 <spool> <spool>/submit
+# spool = /blue/mygroup/hpc-sizer/spool
+# logs = /blue/mygroup/hpc-sizer/logs
+# timeseries = /blue/mygroup/hpc-sizer/timeseries
+
+[collector]
+# Every harvest re-reads this many days before the last successful one.
+overlap_days = 3
+# Once a week a longer pass catches records that arrived late.
+deep_days = 35
+deep_every_days = 7
+# How far back the first harvest reaches (slurmdbd keeps 182 days here).
+first_days = 182
+# Reports refresh the data first when it is older than this.
+refresh_minutes = 15
+# The scheduled job fails (and mails) only when no harvest succeeded for this long.
+stale_hours = 26
+
+[classify]
+# Job names that are interactive sessions submitted with sbatch.
+session_names = vscode
+# Names that say nothing about what ran; grouped by program instead.
+# generic_names = wrap, sbatch, bash, sh, python, python3, rscript, r, job, run, test, tmp, script, interactive, a.out
+
+[measurement]
+# slurmd's task sampling interval (JobAcctGatherFrequency task=).
+acct_sample_sec = 60
+
+[policy]
+lookback_days = 180
+last_n = 20
+min_runs = 3
+min_runs_pooled = 5
+mem_headroom = 1.2
+cpu_headroom = 1.25
+time_headroom = 1.5
+time_percentile = 0.95
+min_time_min = 15
+oom_raise = 1.5
+timeout_raise = 1.5

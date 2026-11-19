@@ -1,421 +1,293 @@
 # HPCsizer
 
-Automated SLURM job profiling and resource sizing for HPC clusters. HPCsizer
-monitors jobs during execution (including multi-node jobs), records
-resource-usage statistics, detects anomalies, builds per-tool regression
-models, and provides data-driven recommendations for memory and CPU requests.
+HPCsizer compares what Slurm jobs **requested** with what they **used**, keeps
+that record for every job of a group's account, and feeds it back — before a
+job is submitted and on demand — so that the next request is closer to what the
+job needs.
 
-## Features
+It has three parts:
 
-### Sidecar monitoring
+| | |
+|---|---|
+| **Collect** | Every finished job of the account, of every member, is read from `sacct` once an hour and stored with the raw values Slurm reported. Slurm deletes its own records after a retention period; the database is the durable copy. |
+| **Analyze** | Jobs are grouped into *families* — the same user running the same thing — and requested memory, CPUs, time and GPUs are set against what the runs used. Nothing derived is stored, so a corrected rule applies to all history at once. |
+| **Report** | `hpg recommend` and `hpg submit` show requested / used / suggested before a job runs. `hpg report`, `history`, `flags`, `job` and `queue` answer the same question for a user, a family, a single job, or the group. |
 
-A lightweight sidecar process (`monitor.py`) is injected into SLURM jobs at
-submit time. It polls `/proc` at adaptive intervals and collects:
+It needs Python 3.9 or newer and nothing else: no packages to install, no
+environment to activate. Any member of the group can run it from the shared
+checkout.
 
-- **Memory**: RSS, HWM, swap (per-process, aggregated across PIDs)
-- **CPU**: user time, system time, CPU fraction, thread count
-- **Disk I/O**: read/write throughput from `/proc/<pid>/io`
-- **NUMA**: miss rate from `/sys/devices/system/node/*/numastat`
-- **Lustre filesystem**: read/write byte throughput and metadata operation
-  rates from `/proc/fs/lustre/llite/*/stats` (node-level counters for
-  `/blue` and `/orange` mounts on HiPerGator)
-- **Hardware counters**: CPI (cycles per instruction) and cache miss rate
-  via `perf stat`, sampled every 5 minutes when available
-  (`perf_event_paranoid <= 1`)
+## For members of the group
 
-### Multi-node support
+Put the checkout's `bin/` on your `PATH` (or call `bin/hpg` by its full path).
 
-For jobs spanning multiple nodes (`SLURM_JOB_NUM_NODES > 1`), HPCsizer
-launches the monitor on every node via `srun --overlap --ntasks-per-node=1`.
-Each node writes its own time-series file with the hostname embedded in the
-filename. At finalization, per-node data is:
+### Before you submit
 
-- Loaded and parsed independently
-- Merged into an aggregate series (RSS/IO summed, CPU averaged)
-- Analyzed for cross-node imbalance (coefficient of variation of per-node
-  mean CPU fraction)
+```console
+$ hpg recommend run_mplx.sh 45
+Job         mplx45k-spleen  [batch, user alice]
+Family      alice/batch/mplx#k-spleen
+Based on    10 runs named mplx45k-spleen by alice, 2026-10-22 to 2026-11-18: 10 COMPLETED
 
-### Anomaly detection (14 flags)
+        Requested   Used by past runs (p50 / p95 / max)        Suggested   Change
+Memory  64 GB       12.4 / 12.4 / 12.4 GB                n=10  15 GB       -77%
+CPUs    16          3.1 / 3.1 / 3.1 cores                n=10  4           -75%
+Time    2-00:00:00  01:10:00 / 01:10:00 / 01:10:00       n=10  2-00:00:00  keep
 
-HPCsizer detects 14 anomaly flags across four categories:
+Why
+  Memory  largest peak 12.4 GB (job 51000042) x 1.2
+  CPUs    highest average cores in use: 3.1 (job 51000042) x 1.25
 
-**Resource misuse:**
-- `oom_killed` — job killed by OOM
-- `mem_overrequest` — peak RSS < 25% of requested memory
-- `idle_cpu` — >50% of samples with CPU fraction < 0.05
-- `single_threaded` — effective core usage < 1.5 with >2 CPUs requested
-- `mem_spike_plateau` — peak in first 10% of runtime, then stable at <60%
+Notes
+  - not shortened together with the CPU count: fewer cores can lengthen the run (history alone suggests 01:45:00)
 
-**I/O patterns:**
-- `io_dominant` — >50% of wall time in high disk I/O with low CPU
-- `lustre_metadata_heavy` — average Lustre metadata ops/s > 100
-- `lustre_io_dominant` — >50% of wall time in high Lustre I/O (read+write
-  > 50 MB/s) with CPU < 10%
+Confidence  high -- 10 runs of this job by this user
 
-**Hardware efficiency:**
-- `high_cpi` — average cycles per instruction > 1.0
-- `cache_thrashing` — cache miss rate > 0.5
-- `numa_misplaced` — average NUMA miss rate > 0.20
-- `catastrophe` — step-function drop in CPU activity mid-job
+Suggested request
+  #SBATCH --mem=15G
+  #SBATCH --cpus-per-task=4
+  #SBATCH --time=2-00:00:00
+Data as of 2026-11-19 18:43 (0 s old)
+```
 
-**Multi-node:**
-- `node_imbalance` — coefficient of variation of per-node CPU > 1.0
-- `idle_nodes` — total CPU time < 50% of single-node capacity
-
-### Visualization
-
-Six-panel time-series plots for each job:
-
-1. Memory RSS (GB) with requested memory line
-2. CPU fraction
-3. Disk I/O read (MB/s)
-4. Thread count
-5. Lustre I/O read + write (MB/s)
-6. NUMA miss rate with 0.20 threshold line
-
-### Recommendation engine
-
-Three-tier system for memory and CPUs: historical database (p90 of past peak
-memory, plus 10% headroom) > per-tool regression model > cold-start heuristics.
-Supports Seurat, SCTransform, scanpy, Cell Ranger, QuPath, and generic
-fallbacks. When no tier can justify a number, none is printed.
-
-Walltime is derived separately, from the p90 elapsed time of completed jobs
-plus 50% headroom. See [docs/sizing-jobs.md](docs/sizing-jobs.md).
-
-### Database
-
-SQLite with WAL mode. Schema includes job metadata, resource requests, sacct
-usage, sidecar measurements, Lustre I/O totals, hardware counters (CPI,
-cache miss rate), multi-node metrics, efficiency scores, and anomaly flags.
-An idempotent `migrate_db()` function adds new columns to existing databases
-on startup.
-
-HPCsizer excludes its own infrastructure jobs. The scheduler chain submits
-`hpcsizer-scheduler` and `hpcsizer-watchdog` roughly every 15 minutes at
-512 MB / 1 CPU for a few seconds each; left in, they would dominate every
-efficiency statistic. `insert_job()` drops any job whose name starts with a
-prefix in `INTERNAL_JOB_NAME_PREFIXES`, which covers all three ingest paths
-(`bin/harvest.sh`, `bin/backfill.py`, `bin/finalize.py`), and `query_jobs()`
-applies the same predicate on read. `get_job()` is deliberately unfiltered so
-a direct lookup by job ID always returns what was asked for.
-
----
-
-## Sizing a job from your history
-
-The question HPCsizer exists to answer: *I want to run this job — what should I
-request?* Four commands, in the order you need them.
+The script is read the way `sbatch` reads it, and options you add on the command
+line override it, as they do for `sbatch`:
 
 ```bash
-# 1. What did jobs like this actually use?
-hpg history --tool Seurat --days 180
-
-# 2. What does HPCsizer suggest for this script?
-hpg recommend my_job.sbatch
-
-# 3. Where am I over-requesting today?
-hpg report --days 90
-hpg flags --days 90
+hpg recommend --mem=32G -c 8 run_mplx.sh 45
 ```
 
-`hpg recommend` prints what it found alongside what your script currently asks
-for:
-
-```
-  Tools found  : SCTransform, Seurat, readRDS
-  Input data   : 22.0GB
-
-  Recommended Memory : 101.3GB
-  Recommended CPUs   : 12
-  Recommended Time   : 04:58:00 (n=14)
-  Source             : database (n=16)
-
-  Current request    : 256.0GB mem, 8 CPUs, 12:00:00
-```
-
-Translate that into directives, rounding up:
+No script is needed to ask about a job you have run before:
 
 ```bash
-#SBATCH --mem=104G              # Recommended Memory
-#SBATCH --cpus-per-task=12      # Recommended CPUs
-#SBATCH --time=05:00:00         # Recommended Time
+hpg recommend --name align
 ```
-
-Or let HPCsizer write them and submit with monitoring attached:
 
 ```bash
-hpg submit my_job.sbatch          # prompts before applying
-hpg submit my_job.sbatch --yes    # apply without prompting
-hpg submit my_job.sbatch --as-is  # keep your numbers, still monitor
+hpg recommend --like 51000093
 ```
-
-Interactive sessions are monitored the same way:
 
 ```bash
-hpg interactive rstudio --time 08:00:00 --mem 64GB --cpus 16
+hpg recommend --kind ood:rstudio
 ```
-
-Always read the `Source` line before trusting a number — `database` means it
-came from real jobs, `heuristic` means it came from a lookup table, and
-`insufficient-data` means no number could be justified at all.
-
-**See [docs/sizing-jobs.md](docs/sizing-jobs.md)** for how each tier is
-computed, which anomaly flags are worth acting on, and what to do when the
-recommendation is weak.
-
-> **Note:** `pip install -e .` puts `hpg` on your PATH, so these commands work
-> from any directory. The `python bin/hpg …` form used in the validation guide
-> below is only needed before installation.
-
----
-
-## Validation guide
-
-Replace the placeholder values below with your own:
-
-| Placeholder | Meaning | Example |
-|---|---|---|
-| `<GROUP_DIR>` | Writable group directory on shared storage | `/blue/mygroup` |
-| `<SLURM_ACCOUNT>` | Your SLURM account string | `mygroup` |
-
-### 1. Clone and create the environment
 
 ```bash
-cd <GROUP_DIR>
-git clone https://github.com/smith6jt-cop/HPCsizer.git hpg-sizer
-cd hpg-sizer
-mamba env create -f environment.yml   # or: conda env create -f environment.yml
-conda activate hpcsizer
-pip install -e .
+hpg recommend --wrap "python archive.py --sample S100"
 ```
 
-### 2. Validate setup and run tests
+When a job has never run, there is nothing to compare with, and `hpg` says so
+instead of inventing a number (exit status 3).
+
+### Submitting
+
+`hpg submit` takes exactly what you would give `sbatch`:
 
 ```bash
-python bin/validate.py
-python -m pytest tests/ -v
+hpg submit run_mplx.sh 45
 ```
 
-`validate.py` creates the runtime directories (`timeseries/`, `plots/`,
-`logs/`), initializes the database, and confirms all tables exist.
+It prints the same report (on standard error), submits the job **as you wrote
+it**, and adds one line to a temporary copy of the script that records what the
+job uses while it runs. `sbatch`'s own output and exit status are passed
+through, so `jid=$(hpg submit --parsable job.sh)` works. Your script file is
+never changed.
 
-All tests should pass. If `test_plotter.py` tests fail on a headless login node
-(no display), that is acceptable as long as all other test files pass.
+To submit with the suggested request instead:
 
-### 3. Set environment variables
+```console
+$ hpg submit --apply run_mplx.sh 45
+...
+Submitting with: --mem=15G --cpus-per-task=4
+The job is profiled; afterwards: hpg job <jobid>
+Submitted batch job 51000200
+```
+
+At a terminal `--apply` asks first; add `--yes` in scripts. `--as-is` skips the
+report, `--no-profile` skips the recording.
+
+### Afterwards
 
 ```bash
-export HPCSIZER_DB="<GROUP_DIR>/hpg-sizer/profiles.db"
-export HPCSIZER_ACCT="<SLURM_ACCOUNT>"
-export HPCSIZER_ROOT="<GROUP_DIR>/hpg-sizer"
+hpg job 51000040
 ```
 
-> **Note:** put the conda environment on local or non-parallel storage if you
-> can, even though the repo itself lives on the group filesystem. A stalled
-> parallel filesystem makes the interpreter's own standard library unreadable
-> at startup, which is fatal before any HPCsizer code runs. In six months of
-> production logs this accounted for 3,519 of 6,331 harvest runs failing.
-> `harvest.sh` now retries and resumes from the last successful window, so a
-> stall costs time rather than data, but the environment placement is the root
-> fix.
-
-### 4. Confirm sacct access
+shows one job: requested and used side by side, where each figure comes from,
+its steps, and its profile if it was submitted with `hpg submit`.
 
 ```bash
-sacct -S "$(date -d '-30 days' +%Y-%m-%d)" -a -A "$HPCSIZER_ACCT" \
-  --noheader --parsable2 \
-  -o JobID,User,JobName,State,ReqMem,MaxRSS,Elapsed | head -10
+hpg history align
 ```
 
-If that returns data, proceed.
-
-> **Note:** Without `-X`, sacct returns both parent and `.batch` step lines.
-> `MaxRSS` is populated on the `.batch` lines; `harvest.sh` and `backfill.py`
-> both use a two-pass merge to capture it.
-
-### 5. Backfill historical data
-
-The harvester's 20-minute lookback window won't capture history. Run the
-one-off backfill script which queries sacct *without* `-X` and does a two-pass
-merge of parent + `.batch` lines so that `MaxRSS` is actually populated:
+lists the runs of a job family and their spread; `hpg history` alone lists your
+recent jobs.
 
 ```bash
-python bin/backfill.py --since 2026-01-01
+hpg queue
 ```
 
-Use `--since` to control how far back to query (default: `2026-01-01`).
+lists what is pending and running next to what each job's family has used so
+far. For a pending job that asks for more than its family ever used, it prints
+the `scontrol update` line that resizes it without resubmitting — useful for a
+batch of jobs submitted together, which cannot be sized until the first of them
+has finished.
 
-### 6. Verify the database
+[docs/sizing-jobs.md](docs/sizing-jobs.md) explains how to read all of this and
+how the suggestions are made.
+
+## For the group
+
+```console
+$ hpg report
+HPCsizer report: account mygroup, 2026-10-20 to 2026-11-19 (30 days)
+145 finished jobs of 4 user(s) in 13 job families; data as of 2026-11-19 18:44
+
+Requested and used, by user
+  User    Jobs  Core-h reserved  busy  Memory GB-h reserved  used  GPU-h  idle  OOM  Timeout
+  alice     61            4,764    7%                70,511   10%   52.0  100%    0        0
+  bjones    48              632   25%                 6,237   39%      -     -    1        1
+  cchen     28              340   70%                 3,044   58%   40.0    0%    0        0
+  dpatel     8              102   59%                 1,524   61%      -     -    0        0
+  Total    145            5,838   13%                81,316   15%   92.0   57%    1        1
+
+By kind of job
+  Kind         Jobs  Core-h reserved  busy  Memory GB-h reserved  used  GPU-h  idle  OOM  Timeout
+  vscode         30            4,288    6%                68,608   10%   52.0  100%    0        0
+  batch          80            1,035   48%                 6,693   47%   40.0    0%    1        1
+  ood:rstudio    10              480    5%                 5,760   37%      -     -    0        0
+  wrap           24             28.8   75%                   230   69%      -     -    0        0
+  interactive     1              6.0    8%                  24.0   20%      -     -    0        0
+
+Memory requested and not used: the 10 largest job families
+  Family                                 Jobs  Requested p50  Used p50 / max  Unused GB-h  Suggested --mem  Last run
+  alice/vscode                             24         256 GB      25 / 30 GB       49,705            37 GB  2026-11-19
+  alice/vscode+gpu                          6         256 GB      25 / 29 GB       11,967            37 GB  2026-11-15
+  bjones/ood:rstudio                       10          96 GB      35 / 40 GB        3,629            49 GB  2026-11-17
+  alice/batch/mplx#k-spleen                30          64 GB  10.3 / 12.4 GB        1,589            15 GB  2026-11-19
+  ...
+```
+
+(The example is a synthetic account; see `tests/synthetic.py`.) The report goes
+on with the families holding the most unused cores and idle GPU time,
+interactive sessions, and the jobs that did not finish. Ratios are weighted by
+resource-hours and taken over measured jobs only; what a ratio leaves out is
+stated under it.
+
+| Command | Shows |
+|---|---|
+| `hpg report [--user U] [--kind K] [--account A] [--days N] [--format text\|md\|json\|csv] [--out FILE]` | requested against used by user, by kind of job, by family, with the suggested next request |
+| `hpg families [--sort cores\|memory\|cpu\|jobs\|recent\|name]` | one line per job family |
+| `hpg history [FAMILY]` | the runs of a family, or your recent jobs |
+| `hpg flags [--flag F] [--jobs]` | flagged jobs by family, with the measurement behind each flag |
+| `hpg job ID` | one job in full |
+| `hpg queue [--user U]` | unfinished jobs next to their family's history |
+| `hpg export [--format csv\|json] [--out FILE]` | one line per job, for a spreadsheet or a notebook |
+| `hpg plot ID` | time series of a profiled job (needs matplotlib) |
+| `hpg recommend ...` | requested / used / suggested for a job about to be submitted |
+| `hpg submit ...` | `sbatch`, with the report first and a sampler inside the job |
+| `hpg backtest [--set KEY=VALUE]` | what the sizing policy would have done on every stored job |
+| `hpg status` | state of collection; non-zero exit when stale or incomplete |
+| `hpg harvest`, `hpg schedule`, `hpg db`, `hpg preflight` | administration, see [docs/operations.md](docs/operations.md) |
+
+Every report ends with the age of its data. `--format md` is meant to be pasted
+into a message to the group; `--format csv` gives one line per family.
+
+## Setting it up
+
+One person, the owner of the checkout, sets up collection. In a directory every
+member can read and nobody else can write:
 
 ```bash
-python bin/validate.py --db
+git clone https://github.com/smith6jt-cop/HPCsizer.git hpc-sizer
 ```
-
-This prints the raw total job count, a check for leaked HPCsizer-internal
-jobs, then per-user summaries, MaxRSS coverage, and anomaly flag distribution
-computed over real jobs only. The raw total stays unfiltered on purpose: if
-internal rows reappear there, the leak check reports `[FAIL]` and names the
-cause (a renamed `--job-name` in `scheduler.sh`, a new internal job, or a
-stale checkout of `backfill.py`).
-
-It then checks that the scheduler chain is still queued. `validate.py` exits
-non-zero if any check fails, so expect a non-zero exit — and a `[WARN]` about
-the chain — any time you run it while the scheduler is stopped.
-
-#### Purging pre-existing internal jobs
-
-Databases backfilled before the filter existed still hold scheduler rows.
-Pause the chain first so `vacuum` is not blocked by other writers:
 
 ```bash
-scancel --name=hpcsizer-scheduler ; scancel --name=hpcsizer-watchdog
-
-# preview what will be removed
-sqlite3 "$HPCSIZER_DB" "select job_name, count(*) from jobs \
-  where job_name like 'hpcsizer-%' group by job_name;"
-
-sqlite3 "$HPCSIZER_DB" "delete from jobs where job_name like 'hpcsizer-%'; vacuum;"
-sqlite3 "$HPCSIZER_DB" "select count(*) from jobs;"
-
-bash bin/scheduler.sh                # restart the chain before validating
-python bin/validate.py --db          # expect: [OK] no HPCsizer-internal jobs
+cd hpc-sizer && cp hpcsizer.ini.example hpcsizer.ini
 ```
 
-Validate *after* restarting the chain: the scheduler-liveness check reports
-`[WARN]` and exits non-zero while the chain is stopped.
-
-Interactive sessions launched by `hpg` are named `hpg-interactive-*` and are
-**not** excluded — those are real user work and stay profiled.
-
-### 7. Verify the CLI commands
-
-These are smoke tests against a fresh install. For using these commands to
-actually size a job, see [Sizing a job from your history](#sizing-a-job-from-your-history).
+Set `accounts` in `hpcsizer.ini` to the Slurm account(s) of the group. Then:
 
 ```bash
-cd "$HPCSIZER_ROOT"
-
-# Efficiency report
-python bin/hpg report --days 90
-
-# Anomaly-flagged jobs
-python bin/hpg flags --days 90
-
-# Per-tool distributional history
-python bin/hpg history --days 90
-
-# Recommend against the bundled test script
-python bin/hpg recommend tests/fixtures/sample_seurat.sbatch
+bin/hpg preflight
 ```
-
-The `recommend` output should detect R as the language and Seurat,
-SCTransform, and FindMarkers as tools. On a fresh database it reports
-`Source : insufficient-data` and no memory figure — the fixture references no
-input file, so with no job history there is nothing to estimate from:
-
-```
-  Recommended Memory : unknown
-  Recommended CPUs   : 4
-  Recommended Time   : unknown (too few completed jobs)
-  Source             : insufficient-data (n=0)
-
-  Current request    : 256.0GB mem, 8 CPUs, 12:00:00
-```
-
-To test input-file detection, point the script at a real dataset on your
-cluster:
 
 ```bash
-cp tests/fixtures/sample_seurat.sbatch /tmp/test.sbatch
-# Append an actual file path so the analyzer can stat and size it
-echo 'Rscript analysis.R /blue/mygroup/data/counts.rds' >> /tmp/test.sbatch
-python bin/hpg recommend /tmp/test.sbatch
+bin/hpg harvest
 ```
-
-`Input data` should now report the size of that `.rds` file instead of `0MB`.
-Only absolute paths under `/blue`, `/orange`, `/red`, `/scratch` and `/home`
-are recognised.
-
-### 8. Start the scheduler
-
-Regular users on HiPerGator do not have access to `crontab`. Instead,
-HPCsizer uses a lightweight self-resubmitting SLURM job that runs every
-15 minutes (and triggers the nightly model update at 3 AM).
-
-Start the scheduler:
 
 ```bash
-sbatch bin/scheduler.sh
+bin/hpg schedule install
 ```
-
-The job requests minimal resources (1 CPU, 512 MB, 5-min time limit). Each
-run resubmits itself with `--begin=now+15minutes` before doing any work, so
-the chain continues even if a single run fails.
-
-As an extra safety net, every run also submits a short-lived **watchdog**
-job (`--begin=now+18minutes`, named `hpcsizer-watchdog`). The watchdog checks
-whether a primary scheduler job is still pending or running; if so it exits
-immediately, and if the chain has died it restarts it. This protects against
-the chain stopping when a single run fails *before* it can resubmit — for
-example a transient node/filesystem error that prevents SLURM from executing
-the batch script at all (exit code 126/127, elapsed only a couple of seconds).
-Because healthy watchdogs do nothing, they do not accumulate.
-
-To stop the scheduler, cancel both the primary and watchdog jobs:
 
 ```bash
-scancel --name=hpcsizer-scheduler
-scancel --name=hpcsizer-watchdog
+bin/hpg status
 ```
 
-Verify it is running:
+`preflight` checks what this code assumes about the cluster and prints PASS or
+FAIL per item. The first `harvest` reads everything Slurm still has (182 days
+by default) and creates the spool that running jobs write their profiles to.
+`schedule install` adds one `scrontab` entry that runs the harvest every hour;
+`--mode chain` is the alternative where `scrontab` is not available.
+
+Moving an existing version 2 installation over is described step by step in
+[docs/operations.md](docs/operations.md).
+
+## What is measured, and what is not
+
+HPCsizer reports what Slurm's accounting measured, and says so when Slurm did
+not measure.
+
+- **Memory** is sampled by Slurm once a minute. A job shorter than two samples
+  has no usable peak; it is counted as *unmeasured*, not as having wasted its
+  request.
+- **CPU time** is not recorded for a job Slurm had to kill (time limit,
+  `scancel`, node failure); the last sampled value is used when there is one.
+- **Interactive sessions** — editors, RStudio, shells — always end by being
+  stopped, and wait for input most of the time. Their average CPU use says
+  little about what they need while working.
+
+The in-job sampler added by `hpg submit` fills these gaps: it reads the job's
+cgroup every few seconds (every 2 s for the first two minutes), so short jobs,
+killed jobs and sessions get a real peak, real CPU time and a *sustained* core
+count. A CPU reduction for a session is only ever suggested from such profiles.
+
+## How it is built
+
+- `lib/slurm.py` is the only place that talks to and parses `sacct`.
+- `lib/db.py` stores jobs in one SQLite file. The file is never written in
+  place on the shared file system: a harvest builds the new database on local
+  disk and publishes it by renaming it over the old one, so readers need no
+  locks and a crash cannot corrupt it.
+- `lib/classify.py`, `lib/metrics.py`, `lib/history.py` and
+  `lib/recommender.py` derive kinds, families, metrics, flags and suggestions
+  when a report is produced.
+- `bin/monitor.py` is the in-job sampler; `lib/profile.py` ingests what it wrote.
+- `bin/harvest.sh` is the launcher the schedule runs.
+
+[docs/data-model.md](docs/data-model.md) lists what is stored and how every
+derived figure is defined.
+
+## Development
 
 ```bash
-squeue -u "$USER" --name=hpcsizer-scheduler
+python3 -m pytest tests/ -q
 ```
-
-After 15-20 minutes, check the logs:
 
 ```bash
-cat logs/harvest.log
+ruff check . bin/hpg && ruff format --check . bin/hpg
 ```
 
-> **Note:** The `--qos=minimal` line in `scheduler.sh` may need to be
-> adjusted or removed depending on your cluster's available QOS tiers. Edit
-> the `#SBATCH --qos` line if the job is rejected.
+The suite needs only `pytest`. It runs the collector, the reports and
+`hpg submit` end to end against stub Slurm commands and a synthetic account
+with every kind of job (`tests/synthetic.py`), and runs the sampler against
+simulated cgroup trees and a real process tree. The plot tests are skipped
+without matplotlib (`environment.yml` describes an environment that has it).
 
-> **Note:** `harvest.sh` now queries without `-X` and merges `.batch` MaxRSS,
-> matching the approach used by `backfill.py` and `finalize.py`.
+## Acknowledgements
 
-### 9. Persist environment variables
+The idea of sampling a job from inside, without administrator access, follows
+TACC Stats. HPCsizer was written for the University of Florida's HiPerGator and
+makes no assumption about a site beyond Slurm with accounting.
 
-```bash
-cat >> ~/.bashrc << EOF
-export HPCSIZER_DB="<GROUP_DIR>/hpg-sizer/profiles.db"
-export HPCSIZER_ACCT="<SLURM_ACCOUNT>"
-export HPCSIZER_ROOT="<GROUP_DIR>/hpg-sizer"
-export PATH="<GROUP_DIR>/hpg-sizer/bin:\$PATH"
-EOF
-```
+## License
 
----
-
-## Architecture overview
-
-```
-bin/hpg              CLI entry point (submit, recommend, interactive, report, history, plot, flags)
-bin/backfill.py      One-time sacct backfill with .batch MaxRSS merging
-bin/validate.py      Setup and database validation checks
-bin/monitor.py       Sidecar process — polls /proc, Lustre stats, and perf counters
-bin/finalize.py      Post-job collector — multi-node merge, sacct, flags, DB insert
-bin/scheduler.sh     Self-resubmitting SLURM job — replaces crontab
-bin/harvest.sh       Harvests sacct data every 15 minutes (called by scheduler)
-bin/update_models.py Fits per-tool linear regression models nightly (called by scheduler)
-
-lib/analyzer.py      Static analysis of sbatch scripts (language, tools, input files)
-lib/db.py            SQLite database layer (WAL mode, schema migration)
-lib/flags.py         Anomaly detection (14 flag types)
-lib/recommender.py   Three-tier recommendation engine (DB > model > heuristic)
-lib/plotter.py       Six-panel time-series visualization (memory, CPU, I/O, threads, Lustre, NUMA)
-```
+See [LICENSE](LICENSE).

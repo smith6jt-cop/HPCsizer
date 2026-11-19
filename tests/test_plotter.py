@@ -1,89 +1,101 @@
-"""Tests for lib/plotter.py"""
+"""Tests for lib/plotter.py and ``hpg plot``.
 
-import csv
-import gzip
+matplotlib is optional: the tests that draw are skipped without it, the ones
+about what happens when it is missing always run.
+"""
+
+import importlib.util
 import os
-import sys
-from pathlib import Path
+import pwd
+import time
 
 import pytest
+from sacct_fixture import simple_job
+from test_profile import series_text, steady
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from lib import cli, collect, plotter, profile
 
-from lib.plotter import load_timeseries, plot_job
-
-
-def _write_ts(path: str, rows: list) -> None:
-    fieldnames = ["elapsed_sec", "rss_gb", "cpu_frac", "io_read_mb_s", "threads", "numa_miss_rate"]
-    with gzip.open(path, "wt", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+HAVE_MATPLOTLIB = importlib.util.find_spec("matplotlib") is not None
+needs_matplotlib = pytest.mark.skipif(not HAVE_MATPLOTLIB, reason="matplotlib is not installed")
+ME = pwd.getpwuid(os.getuid()).pw_name
+JOB = {"job_id": "4242", "job_name": "fit", "user": "alice", "req_mem_mb": 16384, "alloc_cpus": 8}
 
 
-@pytest.fixture
-def sample_ts(tmp_path):
-    rows = [
-        {
-            "elapsed_sec": i * 30,
-            "rss_gb": 10.0 + i * 0.1,
-            "cpu_frac": 0.6,
-            "io_read_mb_s": 5.0,
-            "threads": 4,
-            "numa_miss_rate": 0.01,
-        }
-        for i in range(50)
-    ]
-    ts_path = str(tmp_path / "12345.csv.gz")
-    _write_ts(ts_path, rows)
-    return tmp_path, rows
+def one_node(node="c1", **kwargs):
+    return profile.parse_series(series_text(steady(30, **kwargs), node=node))
 
 
-class TestLoadTimeseries:
-    def test_load_returns_correct_count(self, sample_ts):
-        ts_dir, rows = sample_ts
-        loaded = load_timeseries(str(ts_dir / "12345.csv.gz"))
-        assert len(loaded) == len(rows)
+class TestPlot:
+    @needs_matplotlib
+    def test_png_for_one_node(self, tmp_path):
+        out = plotter.plot_job(JOB, [one_node()], str(tmp_path / "job.png"))
+        assert os.path.getsize(out) > 5000
+        with open(out, "rb") as handle:
+            assert handle.read(8) == b"\x89PNG\r\n\x1a\n"
 
-    def test_load_parses_floats(self, sample_ts):
-        ts_dir, _ = sample_ts
-        loaded = load_timeseries(str(ts_dir / "12345.csv.gz"))
-        assert isinstance(loaded[0]["rss_gb"], float)
-        assert isinstance(loaded[0]["elapsed_sec"], float)
-
-    def test_none_for_empty_values(self, tmp_path):
-        rows = [
-            {
-                "elapsed_sec": 0,
-                "rss_gb": "",
-                "cpu_frac": 0.5,
-                "io_read_mb_s": 0,
-                "threads": 4,
-                "numa_miss_rate": 0,
-            }
+    @needs_matplotlib
+    def test_several_nodes_and_a_gpu(self, tmp_path):
+        samples = [
+            dict(s, gpu_util=50 + i, rd=i * 10**8, wr=i * 10**7) for i, s in enumerate(steady(20))
         ]
-        ts_path = str(tmp_path / "empty_val.csv.gz")
-        _write_ts(ts_path, rows)
-        loaded = load_timeseries(ts_path)
-        assert loaded[0]["rss_gb"] is None
+        a = profile.parse_series(series_text(samples, node="a"))
+        b = profile.parse_series(series_text(samples, node="b"))
+        out = plotter.plot_job(dict(JOB, req_mem_mb=None), [a, b], str(tmp_path / "multi.png"))
+        assert os.path.getsize(out) > 5000
+
+    @needs_matplotlib
+    def test_series_without_samples(self, tmp_path):
+        with pytest.raises(plotter.PlotError, match="no samples"):
+            plotter.plot_job(JOB, [({}, [])], str(tmp_path / "x.png"))
+
+    def test_without_matplotlib_the_reason_is_given(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(plotter, "plt", None)
+        assert plotter.available() is False
+        with pytest.raises(plotter.PlotError, match="needs matplotlib"):
+            plotter.plot_job(JOB, [one_node()], str(tmp_path / "x.png"))
+
+    def test_load_names_each_series_by_its_node(self, tmp_path):
+        path = tmp_path / "4242-1.c7.tsv"
+        path.write_text(series_text(steady(3), node="c7"))
+        ((meta, rows),) = plotter.load([str(path)])
+        assert meta["node"] == "c7" and len(rows) == 3
+        assert plotter.default_name({"job_id": "12_3"}) == "hpg-job-12_3.png"
 
 
-class TestPlotJob:
-    def test_plot_creates_png(self, sample_ts):
-        ts_dir, _ = sample_ts
-        out_dir = str(ts_dir / "plots")
-        result = plot_job("12345", str(ts_dir), out_dir)
-        assert result is not None
-        assert os.path.exists(result)
-        assert result.endswith(".png")
+class TestCommand:
+    @pytest.fixture
+    def profiled(self, cfg, stubs, capsys):
+        now = int(time.time())
+        stubs.sacct_default(
+            simple_job(4242, user=ME, submit=now - 3600, elapsed=290)
+            + simple_job(4243, user=ME, submit=now - 3600)
+        )
+        os.makedirs(cfg.spool_dir)
+        with open(os.path.join(cfg.spool_dir, "4242.c1.tsv"), "w") as handle:
+            handle.write(series_text(steady(30), start=now - 3570))
+        collect.harvest(cfg, now=now, log=lambda _m: None, ingest=profile.ingest_spool)
+        capsys.readouterr()
+        return cfg
 
-    def test_plot_returns_none_when_no_ts(self, tmp_path):
-        result = plot_job("99999", str(tmp_path), str(tmp_path / "plots"))
-        assert result is None
+    def test_job_without_a_profile(self, profiled, capsys):
+        assert cli.main(["plot", "4243"]) == 3
+        assert "has no profile" in capsys.readouterr().err
+        assert cli.main(["plot", "999"]) == 3
 
-    def test_plot_with_job_meta(self, sample_ts):
-        ts_dir, _ = sample_ts
-        out_dir = str(ts_dir / "plots2")
-        meta = {"user": "alice", "job_name": "seurat_test", "req_mem_gb": 64.0}
-        result = plot_job("12345", str(ts_dir), out_dir, job_meta=meta)
-        assert result is not None
+    def test_missing_matplotlib_names_the_series_files(self, profiled, capsys, monkeypatch):
+        monkeypatch.setattr(plotter, "plt", None)
+        assert cli.main(["plot", "4242"]) == 1
+        err = capsys.readouterr().err
+        assert "needs matplotlib" in err and ".c1.tsv.gz" in err
+
+    @needs_matplotlib
+    def test_writes_the_png(self, profiled, capsys, tmp_path):
+        target = tmp_path / "out.png"
+        assert cli.main(["plot", "4242", "--out", str(target)]) == 0
+        assert capsys.readouterr().out.strip() == str(target) and target.stat().st_size > 5000
+
+    def test_job_view_points_to_the_plot(self, profiled, capsys):
+        assert cli.main(["job", "--no-refresh", "4242"]) == 0
+        out = capsys.readouterr().out
+        assert "Profile (in-job sampler, cgroup-v2)" in out and "hpg plot 4242" in out
+        assert "peak; profile" in out

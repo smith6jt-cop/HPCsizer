@@ -20,6 +20,7 @@ from typing import Dict, List
 
 from sacct_fixture import job_row, simple_job, step_row
 
+ACCOUNT = "mygroup"
 HOUR = 3600
 DAY = 86400
 GIB_K = 1024 * 1024  # kilobytes per GiB: sacct prints memory use in K
@@ -367,4 +368,8 @@ def account_rows(now: int) -> List[Dict[str, str]]:
             mem="16G",
         )
     )
+    for row in rows:
+        if row["Account"]:  # job lines; step lines carry no account
+            row["Account"] = row["QOS"] = ACCOUNT
+            row["WorkDir"] = "/blue/%s/%s" % (ACCOUNT, row["User"])
     return rows

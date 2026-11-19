@@ -33,6 +33,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import tempfile
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
@@ -646,12 +647,26 @@ class WriteLock:
         except (OSError, ValueError):
             return "holder unknown"
 
+    def _holder_is_dead(self) -> bool:
+        """True when the lock was taken on this host by a process that no longer exists."""
+        try:
+            with open(self.path) as handle:
+                info = json.load(handle)
+            if info.get("host") != socket.gethostname():
+                return False  # another node: only the age of the lock can tell
+            os.kill(int(info["pid"]), 0)
+        except ProcessLookupError:
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        return False
+
     def _break_if_stale(self) -> bool:
         try:
             age = time.time() - os.stat(self.path).st_mtime
         except FileNotFoundError:
             return True
-        if age <= self.stale_seconds:
+        if age <= self.stale_seconds and not self._holder_is_dead():
             return False
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.path)
@@ -662,6 +677,34 @@ class WriteLock:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.path)
             self.held = False
+
+
+WORKDIR_PREFIX = "hpcsizer-"
+WORKDIR_MAX_AGE = 86400
+
+
+def sweep_workdirs(tmp_root: str, now: Optional[float] = None) -> int:
+    """Remove this user's working copies that a killed writer left behind, a day or more ago."""
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        names = os.listdir(tmp_root)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith(WORKDIR_PREFIX):
+            continue
+        path = os.path.join(tmp_root, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            continue
+        if now - info.st_mtime > WORKDIR_MAX_AGE:
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    return removed
 
 
 class SnapshotWriter:
@@ -693,9 +736,9 @@ class SnapshotWriter:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.lock.acquire()
         try:
-            self.workdir = tempfile.mkdtemp(
-                prefix="hpcsizer-", dir=self.tmp_root or local_tmp_dir()
-            )
+            tmp_root = self.tmp_root or local_tmp_dir()
+            sweep_workdirs(tmp_root)
+            self.workdir = tempfile.mkdtemp(prefix=WORKDIR_PREFIX, dir=tmp_root)
             self.local = os.path.join(self.workdir, "snapshot.db")
             self._origin = _signature(self.db_path)
             if self._origin is not None and _has_wal(self.db_path):

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """hpg -- HPCsizer command line. All logic lives in lib/cli.py."""
+
 # This file must stay valid for old interpreters so that the version check
 # below can run and explain itself instead of failing with a syntax error.
 import os

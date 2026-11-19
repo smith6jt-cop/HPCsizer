@@ -31,6 +31,7 @@ from lib import (
     report,
     sbatch_opts,
     schedule,
+    slurm,
     submit,
 )
 from lib.config import Config, load_config
@@ -325,6 +326,20 @@ def cmd_db(args: argparse.Namespace, cfg: Config) -> int:
         for path in stats["backup"]:
             print("  backup                  : %s" % path)
         print("Next: hpg harvest --since %gd" % cfg.first_days)
+        return EXIT_OK
+
+    if args.db_command == "reparse":
+        stats = collect.reparse(cfg, log=_err)
+        print(
+            "Re-derived %s of %s stored jobs from their sacct records (parser version %d); "
+            "%s left as they are"
+            % (
+                fmt_int(stats["reparsed"]),
+                fmt_int(stats["rows"]),
+                slurm.PARSER_VERSION,
+                fmt_int(stats["skipped"]),
+            )
+        )
         return EXIT_OK
 
     # check
@@ -853,6 +868,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="migrate even if old scheduler jobs are queued"
     )
     dsub.add_parser("check", help="integrity check and row counts")
+    dsub.add_parser("reparse", help="re-derive every stored job from the sacct record kept with it")
     p.set_defaults(func=cmd_db)
 
     p = sub.add_parser("schedule", help="install, show or remove the scheduled harvest")

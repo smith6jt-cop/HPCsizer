@@ -490,8 +490,9 @@ def _cpus(
         res["kept_because"] = "unprofiled-session" if session else "unmeasured"
         if session:
             res["notes"].append(
-                "a session waits for input most of the time, so its average CPU use says "
-                "little; submit it with 'hpg submit' to record what it really uses"
+                "a session waits for input most of the time, so its average CPU use says little; "
+                "%d of these %d sessions have a profile and %d are needed to judge the CPU count "
+                "(submit sessions with 'hpg submit')" % (len(basis), len(runs), cfg.min_runs)
             )
         else:
             res["notes"].append(

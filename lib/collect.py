@@ -15,6 +15,7 @@ Nothing is lost between runs because of three properties together:
 """
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -272,6 +273,49 @@ def harvest(
             " (deep pass)" if deep else "",
         )
     )
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Re-deriving stored rows
+# ---------------------------------------------------------------------------
+
+
+def reparse(cfg: Config, log: Logger = _stderr) -> Dict[str, int]:
+    """Rebuild every stored job from the sacct record that is kept with it.
+
+    Slurm deletes its records after its retention period, so a job older than
+    that cannot be asked for again. This applies the current reading rules to
+    what was received at the time: after a correction to the parser, history
+    beyond Slurm's reach is corrected too. Rows migrated from version 2 have no
+    record and are left as they are.
+    """
+    stats = {"rows": 0, "reparsed": 0, "skipped": 0}
+    with db.SnapshotWriter(
+        cfg.db_path, stale_seconds=cfg.lock_stale_minutes * 60, allow_create=False
+    ) as conn:
+        rows = conn.execute("SELECT id, source, raw_json FROM jobs ORDER BY id").fetchall()
+        for row in rows:
+            stats["rows"] += 1
+            if row["source"] != "sacct" or not row["raw_json"]:
+                stats["skipped"] += 1
+                continue
+            try:
+                job_row = json.loads(row["raw_json"])
+                step_rows = [
+                    json.loads(r[0])
+                    for r in conn.execute(
+                        "SELECT raw_json FROM steps WHERE job_pk=? AND raw_json IS NOT NULL "
+                        "ORDER BY start_ts, step_id",
+                        (row["id"],),
+                    )
+                ]
+                record, steps = slurm.merge_job(job_row, step_rows)
+                db.upsert_job(conn, record, steps)
+                stats["reparsed"] += 1
+            except (ValueError, KeyError) as exc:
+                stats["skipped"] += 1
+                log("[reparse] job row %s: %s" % (row["id"], exc))
     return stats
 
 

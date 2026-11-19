@@ -4,6 +4,7 @@ import os
 import sqlite3
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,48 @@ class TestSnapshotWriter:
         with pytest.raises(db.LockBusy) as err:
             write_jobs(dbfile, make_job(1))
         assert "other" in str(err.value)
+
+    def test_lock_of_a_writer_that_died_on_this_host_is_taken_over_at_once(self, dbfile):
+        """After a kill -9 the next harvest on the same node need not wait half an hour."""
+        import socket
+        import subprocess
+        import sys
+
+        os.makedirs(os.path.dirname(dbfile))
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        Path(dbfile + ".lock").write_text(
+            '{"host": "%s", "pid": %d, "time": 0}' % (socket.gethostname(), gone.pid)
+        )
+        assert write_jobs(dbfile, make_job(1)) == ["inserted"]
+
+    def test_lock_of_a_live_writer_on_this_host_is_respected(self, dbfile):
+        import socket
+
+        os.makedirs(os.path.dirname(dbfile))
+        Path(dbfile + ".lock").write_text(
+            '{"host": "%s", "pid": %d, "time": 0}' % (socket.gethostname(), os.getpid())
+        )
+        with pytest.raises(db.LockBusy):
+            write_jobs(dbfile, make_job(1))
+
+    def test_working_copies_of_killed_writers_are_swept_after_a_day(self, dbfile, tmp_path):
+        tmp = tmp_path / "localtmp"
+        old = tmp / "hpcsizer-dead1"
+        fresh = tmp / "hpcsizer-live2"
+        other = tmp / "somebody-elses"
+        for folder in (old, fresh, other):
+            folder.mkdir(parents=True)
+            (folder / "snapshot.db").write_bytes(b"x" * 10)
+        long_ago = time.time() - 2 * 86400
+        os.utime(str(old), (long_ago, long_ago))
+        os.utime(str(other), (long_ago, long_ago))
+        with db.SnapshotWriter(dbfile, tmp_dir=str(tmp)) as conn:
+            db.upsert_job(conn, *make_job(1))
+        assert not old.exists(), "left by a writer killed two days ago"
+        assert fresh.exists(), "could belong to a writer that is still running"
+        assert other.exists(), "not ours"
+        assert sorted(p.name for p in tmp.iterdir()) == ["hpcsizer-live2", "somebody-elses"]
 
     def test_previous_snapshot_is_kept(self, dbfile):
         write_jobs(dbfile, make_job(1))

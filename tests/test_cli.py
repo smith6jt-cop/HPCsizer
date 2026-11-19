@@ -3,12 +3,17 @@
 import json
 import os
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from conftest import SCRONTAB_STUB
 from sacct_fixture import simple_job
 
 from lib import cli, collect, db
+
+REPO = Path(__file__).resolve().parent.parent
 
 DAY = 86400
 
@@ -141,6 +146,55 @@ class TestDb:
         assert hpg("db", "migrate") == 1
         assert "scancel --name=hpcsizer-scheduler" in capsys.readouterr().err
         assert hpg("db", "migrate", "--force") == 0
+
+
+class TestReparse:
+    def test_stored_rows_are_rebuilt_from_their_sacct_records(self, env, root, capsys):
+        """A corrected parser reaches jobs Slurm has long deleted."""
+        env.sacct_default(recent(1, batch_total_cpu="02:30.500") + recent(2))
+        assert hpg("harvest") == 0
+        path = str(root / "profiles.db")
+        conn = sqlite3.connect(path)
+        before = conn.execute(
+            "SELECT cpu_sec, peak_mem_bytes FROM jobs WHERE job_id='1'"
+        ).fetchone()
+        # What an older, wrong parser would have left behind:
+        conn.execute("UPDATE jobs SET cpu_sec=0, peak_mem_bytes=NULL, parser_version=0, state='?'")
+        conn.execute("UPDATE steps SET cpu_sec=0")
+        conn.commit()
+        conn.close()
+        env.remove("sacct")  # Slurm no longer has these jobs
+        capsys.readouterr()
+        assert hpg("db", "reparse") == 0
+        assert "Re-derived 2 of 2 stored jobs" in capsys.readouterr().out
+        with db.reader(path) as conn:
+            job = db.find_jobs(conn, "1")[0]
+            steps = db.fetch_steps(conn, job["id"])
+        assert (job["cpu_sec"], job["peak_mem_bytes"]) == tuple(before)
+        assert job["cpu_sec"] == pytest.approx(150.501) and job["state"] == "COMPLETED"
+        assert job["parser_version"] == collect.slurm.PARSER_VERSION
+        assert {s["step_id"] for s in steps} == {"batch", "extern"}
+        assert sum(s["cpu_sec"] for s in steps) == pytest.approx(150.501)
+
+    def test_migrated_rows_are_left_alone(self, env, root, capsys):
+        import v2_schema
+
+        path = str(root / "profiles.db")
+        v2_schema.create(path)
+        v2_schema.insert_job(
+            path,
+            {"job_id": "9", "user": "u", "job_name": "old", "state": "COMPLETED", "flags": "[]",
+             "end_time": "2026-05-01T08:10:00", "sacct_elapsed_sec": 600},
+        )  # fmt: skip
+        assert hpg("db", "migrate") == 0
+        capsys.readouterr()
+        assert hpg("db", "reparse") == 0
+        assert "Re-derived 0 of 1 stored jobs" in capsys.readouterr().out
+        with db.reader(path) as conn:
+            assert db.find_jobs(conn, "9")[0]["source"] == "legacy"
+
+    def test_needs_a_database(self, env, capsys):
+        assert hpg("db", "reparse") == 1
 
 
 class TestSchedule:
@@ -352,3 +406,35 @@ def test_a_harvest_also_ingests_profiles():
 
     assert cli._ingest_hook() is profile.ingest_spool
     assert collect.DAY == DAY
+
+
+class TestShim:
+    """bin/hpg: what a user actually runs."""
+
+    SHIM = REPO / "bin" / "hpg"
+
+    def test_stays_valid_for_old_interpreters(self):
+        """So that it can say "needs Python 3.9" instead of dying on a syntax error."""
+        import ast
+
+        ast.parse(self.SHIM.read_text(), feature_version=(3, 6))
+
+    def test_runs_without_any_third_party_package(self, root):
+        done = subprocess.run(
+            [sys.executable, "-I", "-S", str(self.SHIM), "--version"],
+            stdout=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=60,
+        )
+        assert done.returncode == 0 and done.stdout.startswith("hpg 3.")
+
+    def test_found_through_a_symlink(self, root, tmp_path):
+        link = tmp_path / "hpg"
+        link.symlink_to(self.SHIM)
+        done = subprocess.run(
+            [sys.executable, str(link), "status", "--no-sacct"],
+            stdout=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=60,
+        )
+        assert done.returncode == 1 and "STATUS: MISSING" in done.stdout

@@ -37,6 +37,13 @@ def _hours(series: Sequence[Tuple[float, float]], start: float, scale: float = 1
     return [(t - start) / 3600.0 for t, _v in series], [v / scale for _t, v in series]
 
 
+def _legend(ax, ncol: int = 1) -> None:
+    """A legend only where something was drawn with a label."""
+    handles, _labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=7, loc="upper right", ncol=ncol)
+
+
 def plot_job(
     job: Mapping[str, Any],
     node_series: Sequence[Tuple[Dict[str, str], Sequence[Dict[str, Any]]]],
@@ -55,7 +62,11 @@ def plot_job(
     cores = profile.aligned_sum([profile.rate_series(rows, "cpu") for _m, rows in usable])
     read = profile.aligned_sum([profile.rate_series(rows, "rd") for _m, rows in usable])
     write = profile.aligned_sum([profile.rate_series(rows, "wr") for _m, rows in usable])
-    gpu = [s for s in (profile.value_series(rows, "gpu_util") for _m, rows in usable) if s]
+    gpu = [
+        (meta.get("node", "?"), series)
+        for meta, series in ((m, profile.value_series(rows, "gpu_util")) for m, rows in usable)
+        if series
+    ]
     lustre = profile.aligned_sum(
         [
             profile.rate_series(rows, key)
@@ -103,7 +114,7 @@ def plot_job(
             label="requested %.0f GB" % (job["req_mem_mb"] / 1024.0),
         )
     ax.set_ylabel("Memory (GB)")
-    ax.legend(fontsize=7, loc="upper right", ncol=2)
+    _legend(ax, ncol=2)
 
     ax = by_name["cores"]
     if cores:
@@ -119,7 +130,7 @@ def plot_job(
             label="allocated %d" % job["alloc_cpus"],
         )
     ax.set_ylabel("Cores")
-    ax.legend(fontsize=7, loc="upper right")
+    _legend(ax)
 
     ax = by_name["io"]
     for series, color, label in ((read, "#ff7f0e", "read"), (write, "#9467bd", "written")):
@@ -127,21 +138,16 @@ def plot_job(
             xs, ys = _hours(series, start, MIB)
             ax.plot(xs, ys, color=color, linewidth=0.9, label=label)
     ax.set_ylabel("I/O (MB/s)")
-    ax.legend(fontsize=7, loc="upper right")
+    _legend(ax)
 
     if "gpu" in by_name:
         ax = by_name["gpu"]
-        for index, series in enumerate(gpu):
+        for name, series in gpu:
             xs, ys = _hours(series, start)
-            ax.plot(
-                xs,
-                ys,
-                linewidth=0.9,
-                label="node %d" % (index + 1) if len(gpu) > 1 else "busiest GPU",
-            )
+            ax.plot(xs, ys, linewidth=0.9, label=name if len(gpu) > 1 else "busiest GPU")
         ax.set_ylabel("GPU (%)")
         ax.set_ylim(0, 105)
-        ax.legend(fontsize=7, loc="upper right")
+        _legend(ax)
 
     if "lustre" in by_name:
         ax = by_name["lustre"]

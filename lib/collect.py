@@ -69,6 +69,9 @@ def _run_sacct_once(cmd: Sequence[str]) -> str:
     return proc.stdout
 
 
+run_sacct = _run_sacct_once
+
+
 def fetch_window(
     cfg: Config,
     start_ts: int,

@@ -144,7 +144,7 @@ class TestMemory:
         mem = rec_for(conf, rows, named(conf, mem="64G"))["mem"]
         assert mem["suggested"] == 15 * 1024  # 12.0 x 1.2 = 14.4 -> 15 GB
         assert mem["action"] == "lower" and mem["change"] == pytest.approx(15 / 64 - 1)
-        assert mem["used"]["n"] == 9 and "largest peak 12.0 GB" in mem["basis"]
+        assert mem["used"]["n"] == 9 and "largest peak 12 GB (job 5000008) x 1.2" in mem["basis"]
 
     def test_never_below_the_largest_peak_of_any_run(self, conf):
         rows = [run(i) for i in range(5)]
@@ -640,7 +640,10 @@ class TestText:
         assert "10 runs named mplx12k-spleen by alice" in text and "9 COMPLETED, 1 TIMEOUT" in text
         memory = next(line for line in text.splitlines() if line.startswith("Memory"))
         assert (
-            "64 GB" in memory and "/ 12.0 GB" in memory and "15 GB" in memory and "-77%" in memory
+            "64 GB" in memory
+            and "10 / 12 / 12 GB" in memory
+            and "15 GB" in memory
+            and "-77%" in memory
         )
         assert "#SBATCH --mem=15G" in text and "#SBATCH --cpus-per-task=4" in text
         assert "hit its 01:00:00 limit" in text and "Confidence  high" in text

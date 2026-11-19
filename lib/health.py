@@ -14,7 +14,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from lib import __version__, collect, db, schedule, slurm
+from lib import __version__, collect, db, queue, schedule, slurm
 from lib.config import Config
 
 DAY = 86400
@@ -273,6 +273,30 @@ def preflight(
     else:
         checks.append(
             _check("full-retention query", FAIL, (err.strip().splitlines() or ["failed"])[-1])
+        )
+
+    # What `hpg queue` asks: jobs that are pending or running right now.
+    code, out, err = _run(queue.open_jobs_cmd(cfg), timeout=300, env=slurm.sacct_env())
+    if code == 0:
+        try:
+            open_rows = [
+                r
+                for r in slurm.records_to_dicts(slurm.split_records(out))
+                if "." not in r.get("JobIDRaw", "") and slurm.is_open(r)
+            ]
+            checks.append(
+                _check(
+                    "unfinished jobs query",
+                    PASS,
+                    "%d pending or running job(s) listed by sacct -s (used by hpg queue)"
+                    % len(open_rows),
+                )
+            )
+        except slurm.SacctFormatError as exc:
+            checks.append(_check("unfinished jobs query", WARN, "output not parseable: %s" % exc))
+    else:
+        checks.append(
+            _check("unfinished jobs query", WARN, (err.strip().splitlines() or ["failed"])[-1])
         )
 
     code, out, err = _run([cfg.scontrol, "show", "config"], timeout=60)

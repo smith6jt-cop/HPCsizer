@@ -1,5 +1,6 @@
 """Formatting of values for people: sizes, durations, tables."""
 
+import textwrap
 import time
 from typing import Any, List, Optional, Sequence
 
@@ -50,7 +51,7 @@ def fmt_num(value: Optional[float], digits: int = 1) -> str:
     if value != 0 and abs(value) < 10 ** (-digits):
         return "%.2g" % value
     text = "%.*f" % (digits, value)
-    return text[:-2] if digits == 1 and text.endswith(".0") and abs(value) >= 100 else text
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def fmt_gb(gb: Optional[float]) -> str:
@@ -129,6 +130,11 @@ def table(
         ]
         lines.append((indent + "  ".join(parts)).rstrip())
     return "\n".join(lines)
+
+
+def wrap(text: str, width: int = 100, indent: str = "") -> str:
+    """Wrap a paragraph for the terminal."""
+    return textwrap.fill(text, width=width, initial_indent=indent, subsequent_indent=indent)
 
 
 def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[Any]], align: str = "") -> str:

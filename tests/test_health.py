@@ -3,7 +3,7 @@
 import sqlite3
 
 from conftest import SCRONTAB_STUB
-from sacct_fixture import BASE_TS, simple_job
+from sacct_fixture import BASE_TS, job_row, simple_job
 
 from lib import collect, health
 
@@ -95,6 +95,7 @@ class TestPreflight:
         rows = simple_job(1, submit=NOW - 3600) + simple_job(
             2, submit=NOW - 7200, user="bjones", submit_line="sbatch --wrap python x.py"
         )
+        rows.append(job_row(3, state="PENDING", started=False, ended=False, submit=NOW - 60))
         stubs.sacct_default(rows)
         stubs.install("scrontab", SCRONTAB_STUB)
         stubs.install("scontrol")
@@ -112,6 +113,8 @@ class TestPreflight:
         assert checks["value forms"]["status"] == "PASS"
         assert "--wrap" in checks["SubmitLine form"]["detail"]
         assert checks["full-retention query"]["status"] == "PASS"
+        assert checks["unfinished jobs query"]["status"] == "PASS"
+        assert checks["unfinished jobs query"]["detail"].startswith("1 pending or running job(s)")
         assert "MaxJobId=67043328" in checks["cluster limits"]["detail"]
         assert checks["scrontab enabled"]["status"] == "PASS"
         assert checks["scrontab answers"]["status"] == "PASS"

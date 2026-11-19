@@ -4,10 +4,7 @@ Commands
 --------
 hpg submit <script.sbatch>         Analyze, recommend, confirm, submit with monitoring
 hpg interactive [rstudio|jupyter|vscode|bash]  Launch interactive session with monitoring
-hpg report [--user USER] [--days N]  Group efficiency report
-hpg history [--user USER] [--tool TOOL]  Per-application distributional summaries
 hpg plot <job_id>                  Multi-panel time-series plot
-hpg flags [--days N]               List anomaly-flagged jobs
 """
 
 import json
@@ -16,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 # Allow importing lib from parent directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,7 +24,7 @@ except ImportError:
     sys.exit("ERROR: 'click' is required. Install it with: pip install click")
 
 from lib.legacy_analyzer import analyze_script
-from lib.legacy_db import get_job, init_db, input_gb_from_job, query_jobs
+from lib.legacy_db import get_job, init_db
 from lib.legacy_recommender import recommend
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -347,124 +344,6 @@ def interactive(session_type: str, walltime: str, mem: str, cpus: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# hpg report
-# ---------------------------------------------------------------------------
-
-
-@cli.command("report")
-@click.option("--user", default=None, help="Filter to a specific user")
-@click.option("--days", default=30, show_default=True, help="Days of history to include")
-def report(user: Optional[str], days: int) -> None:
-    """Group efficiency report with anomaly flags."""
-    _ensure_db()
-    jobs = query_jobs(user=user, days=days, db_path=_DEFAULT_DB)
-    if not jobs:
-        click.echo(f"No jobs found in the last {days} days.")
-        return
-
-    # Aggregate
-    total = len(jobs)
-    flagged = [j for j in jobs if j.get("flags") and json.loads(j["flags"] or "[]")]
-    oom = [j for j in jobs if "oom_killed" in (j.get("flags") or "")]
-    mem_effs = [j["mem_efficiency"] for j in jobs if j.get("mem_efficiency") is not None]
-    cpu_effs = [j["cpu_efficiency"] for j in jobs if j.get("cpu_efficiency") is not None]
-    wastes = [j["waste_gb"] for j in jobs if j.get("waste_gb") is not None]
-
-    avg_mem_eff = sum(mem_effs) / len(mem_effs) * 100 if mem_effs else 0
-    avg_cpu_eff = sum(cpu_effs) / len(cpu_effs) * 100 if cpu_effs else 0
-    total_waste = sum(wastes)
-
-    click.echo("\n" + "=" * 60)
-    click.echo("  HPCsizer Group Efficiency Report")
-    click.echo(f"  Period: last {days} days" + (f"  User: {user}" if user else ""))
-    click.echo("=" * 60)
-    click.echo(f"  Total jobs           : {total}")
-    click.echo(f"  Flagged jobs         : {len(flagged)} ({100 * len(flagged) / total:.1f}%)")
-    click.echo(f"  OOM-killed jobs      : {len(oom)}")
-    click.echo(f"  Avg memory efficiency: {avg_mem_eff:.1f}%")
-    click.echo(f"  Avg CPU efficiency   : {avg_cpu_eff:.1f}%")
-    click.echo(f"  Est. wasted GB total : {total_waste:.1f} GB")
-    click.echo("")
-
-    # Per-user breakdown
-    users: Dict[str, List[Dict[str, Any]]] = {}
-    for j in jobs:
-        u = j.get("user") or "unknown"
-        users.setdefault(u, []).append(j)
-
-    click.echo("  Per-user breakdown:")
-    click.echo(f"  {'User':<20} {'Jobs':>6} {'Flags':>6} {'MemEff%':>8} {'Waste GB':>10}")
-    click.echo("  " + "-" * 54)
-    for u, ujobs in sorted(users.items()):
-        uflagged = sum(1 for j in ujobs if j.get("flags") and json.loads(j.get("flags") or "[]"))
-        umes = [j["mem_efficiency"] for j in ujobs if j.get("mem_efficiency") is not None]
-        ueff = sum(umes) / len(umes) * 100 if umes else 0
-        uwaste = sum(j["waste_gb"] for j in ujobs if j.get("waste_gb") is not None)
-        click.echo(f"  {u:<20} {len(ujobs):>6} {uflagged:>6} {ueff:>8.1f} {uwaste:>10.1f}")
-
-    # Anomaly summary
-    if flagged:
-        all_flags: Dict[str, int] = {}
-        for j in flagged:
-            for flag in json.loads(j.get("flags") or "[]"):
-                all_flags[flag] = all_flags.get(flag, 0) + 1
-        click.echo("\n  Anomaly flags:")
-        for flag, count in sorted(all_flags.items(), key=lambda x: -x[1]):
-            click.echo(f"    {flag:<30} {count:>4} ({100 * count / total:.1f}%)")
-
-    click.echo("=" * 60 + "\n")
-
-
-# ---------------------------------------------------------------------------
-# hpg history
-# ---------------------------------------------------------------------------
-
-
-@cli.command("history")
-@click.option("--user", default=None, help="Filter to a specific user")
-@click.option("--tool", default=None, help="Filter to a specific tool")
-@click.option("--days", default=90, show_default=True, help="Days of history")
-def history(user: Optional[str], tool: Optional[str], days: int) -> None:
-    """Per-application distributional summaries."""
-    _ensure_db()
-    jobs = query_jobs(user=user, tool=tool, days=days, db_path=_DEFAULT_DB)
-    if not jobs:
-        click.echo("No jobs found.")
-        return
-
-    label = tool if tool else "all tools"
-    click.echo(f"\nHistorical summary for {label} ({len(jobs)} jobs, last {days} days):\n")
-
-    def _hist(vals: List[float], label: str) -> None:
-        if not vals:
-            click.echo(f"  {label}: no data")
-            return
-        vals_s = sorted(vals)
-        n = len(vals_s)
-        p = lambda pct: vals_s[min(int(pct / 100 * n), n - 1)]
-        click.echo(
-            f"  {label}: "
-            f"min={p(0):.2f}  p25={p(25):.2f}  median={p(50):.2f}  "
-            f"p75={p(75):.2f}  p90={p(90):.2f}  max={p(100):.2f}"
-        )
-
-    runtimes = [j["sacct_elapsed_sec"] / 3600 for j in jobs if j.get("sacct_elapsed_sec")]
-    mems = [j.get("sidecar_peak_gb") or j.get("sacct_peak_rss_gb") for j in jobs]
-    mems = [m for m in mems if m is not None]
-    cpu_effs = [j["cpu_efficiency"] * 100 for j in jobs if j.get("cpu_efficiency") is not None]
-    mem_effs = [j["mem_efficiency"] * 100 for j in jobs if j.get("mem_efficiency") is not None]
-    inputs = [input_gb_from_job(j) for j in jobs]
-    inputs_clean = [i for i in inputs if i is not None and i > 0]
-
-    _hist(runtimes, "Runtime (hrs)      ")
-    _hist(mems, "Peak memory (GB)   ")
-    _hist(cpu_effs, "CPU efficiency (%) ")
-    _hist(mem_effs, "Mem efficiency (%) ")
-    _hist(inputs_clean, "Input size (GB)    ")
-    click.echo()
-
-
-# ---------------------------------------------------------------------------
 # hpg plot
 # ---------------------------------------------------------------------------
 
@@ -492,31 +371,6 @@ def plot(job_id: str, output_dir: str) -> None:
         click.echo(f"Plot saved: {out}")
     else:
         click.echo(f"No time-series data found for job {job_id}.")
-
-
-# ---------------------------------------------------------------------------
-# hpg flags
-# ---------------------------------------------------------------------------
-
-
-@cli.command("flags")
-@click.option("--days", default=30, show_default=True, help="Days of history")
-@click.option("--user", default=None, help="Filter to user")
-def flags(days: int, user: Optional[str]) -> None:
-    """List all anomaly-flagged jobs."""
-    _ensure_db()
-    jobs = query_jobs(user=user, days=days, db_path=_DEFAULT_DB)
-    flagged = [j for j in jobs if j.get("flags") and json.loads(j.get("flags") or "[]")]
-    if not flagged:
-        click.echo("No anomaly-flagged jobs found.")
-        return
-
-    click.echo(f"\n{'Job ID':<16} {'User':<16} {'Flags'}")
-    click.echo("-" * 70)
-    for j in flagged:
-        flag_list = json.loads(j.get("flags") or "[]")
-        click.echo(f"{j['job_id']:<16} {(j.get('user') or 'unknown'):<16} {', '.join(flag_list)}")
-    click.echo()
 
 
 if __name__ == "__main__":

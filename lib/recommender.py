@@ -354,6 +354,7 @@ def _blank(requested: Optional[float], requested_from: Optional[str]) -> Dict[st
         "action": None,
         "change": None,
         "basis": None,
+        "kept_because": None,
         "notes": [],
     }
 
@@ -482,9 +483,11 @@ def _cpus(
     requested = res["requested"]
     if multi:
         res.update(suggested=requested, action="keep" if requested else None, change=0.0)
+        res["kept_because"] = "multi"
         res["notes"].append("more than one task or node: the CPU count is not adjusted")
         return
     if len(basis) < cfg.min_runs:
+        res["kept_because"] = "unprofiled-session" if session else "unmeasured"
         if session:
             res["notes"].append(
                 "a session waits for input most of the time, so its average CPU use says "
@@ -501,6 +504,7 @@ def _cpus(
     value, top, what = max(basis, key=lambda item: item[0])
     alloc = top["m"]["cores_alloc"]
     if alloc and value >= SATURATED * alloc:
+        res["kept_because"] = "saturated"
         res["notes"].append(
             "job %s kept all %d of its cores busy, so fewer are not suggested" % (_jid(top), alloc)
         )

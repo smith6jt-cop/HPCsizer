@@ -22,7 +22,11 @@ from lib import (
     db,
     health,
     history,
+    jobview,
+    metrics,
+    queue,
     recommender,
+    report,
     sbatch_opts,
     schedule,
 )
@@ -30,7 +34,7 @@ from lib.config import Config, load_config
 from lib.fmt import fmt_age, fmt_bytes, fmt_int, fmt_ts
 
 # Commands still served by the version 2 implementation until they are replaced.
-LEGACY_COMMANDS = ("submit", "interactive", "report", "history", "plot", "flags")
+LEGACY_COMMANDS = ("submit", "interactive", "plot")
 
 # Commands whose trailing arguments are sbatch's, passed through untouched:
 # hpg's own options come first, and everything from the first other word on is
@@ -477,6 +481,237 @@ def cmd_backtest(args: argparse.Namespace, cfg: Config) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+
+def _emit(text: str, out: Optional[str] = None) -> None:
+    """Print a report, or write it to ``out`` and say so on stderr."""
+    if not out:
+        print(text)
+        return
+    with open(out, "w") as handle:
+        handle.write(text if text.endswith("\n") else text + "\n")
+    _err("wrote %s" % out)
+
+
+def _load(
+    args: argparse.Namespace,
+    cfg: Config,
+    now: int,
+    days: float,
+    user: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """``(window, everything, info)``: the jobs a report covers, and the history behind them.
+
+    The window is the last ``days`` days, narrowed to ``user`` and ``kind``;
+    history reaches back as far as recommendations look, whatever the window.
+    """
+    refresh = collect.maybe_refresh(
+        cfg, enabled=not args.no_refresh, now=now, ingest=_ingest_hook()
+    )
+    reach = max(float(days), float(cfg.lookback_days))
+    everything, info = history.load(cfg, since_ts=now - int(reach * history.DAY))
+    info["refresh"] = refresh
+    since = now - int(days * history.DAY)
+    window = [
+        job
+        for job in everything
+        if (job.get("end_ts") or 0) >= since
+        and (not user or job.get("user") == user)
+        and (not kind or job.get("kind") == kind)
+    ]
+    return window, everything, info
+
+
+def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    window, everything, info = _load(args, cfg, now, args.days, args.user, args.kind)
+    rep = report.build(
+        window,
+        history.History(everything),
+        cfg,
+        now,
+        days=args.days,
+        user=args.user,
+        kind=args.kind,
+        top=args.top,
+        watermark_ts=info["watermark_ts"],
+    )
+    if args.format == "json":
+        text = json.dumps(rep, indent=2, sort_keys=True)
+    elif args.format == "csv":
+        text = report.render_csv(rep)
+    elif args.format == "md":
+        text = (
+            report.render_markdown(rep)
+            + "\n\n"
+            + data_line(info["watermark_ts"], now, info["refresh"])
+        )
+    else:
+        text = (
+            report.render_text(rep) + "\n" + data_line(info["watermark_ts"], now, info["refresh"])
+        )
+    _emit(text, args.out)
+    return EXIT_OK if window else EXIT_NO_DATA
+
+
+def cmd_families(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    days = args.days or cfg.lookback_days
+    window, _everything, info = _load(args, cfg, now, days, args.user, args.kind)
+    rows = sorted(report.family_rows(window), key=report.FAMILY_SORTS[args.sort])
+    for row in rows:
+        del row["_last"]
+    if args.json:
+        print(json.dumps(rows[: args.limit] if args.limit else rows, indent=2, sort_keys=True))
+        return EXIT_OK if rows else EXIT_NO_DATA
+    shown = rows[: args.limit] if args.limit else rows
+    print(
+        "%s job families in the last %g days%s"
+        % (
+            fmt_int(len(rows)),
+            days,
+            "" if len(shown) == len(rows) else " (the first %d by %s)" % (len(shown), args.sort),
+        )
+    )
+    if shown:
+        print()
+        print(report.families_table(shown))
+    print(data_line(info["watermark_ts"], now, info["refresh"]))
+    return EXIT_OK if rows else EXIT_NO_DATA
+
+
+def cmd_history(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    days = args.days or cfg.lookback_days
+    user = args.user or current_user()
+    query = args.family
+    window, _everything, info = _load(args, cfg, now, days)  # every user: a family names its own
+    if not query:
+        runs = [job for job in window if job.get("user") == user]
+        title = "Jobs of %s in the last %g days" % (user, days)
+        with_family = True
+    else:
+        matches = jobview.match_families(window, query, user)
+        if not matches:
+            _err("hpg history: no job family matches %r in the last %g days" % (query, days))
+            return EXIT_NO_DATA
+        if len(matches) > 1:
+            _err("hpg history: %r matches %d families; name one of them:" % (query, len(matches)))
+            for family in matches[:30]:
+                _err("  " + family)
+            return EXIT_USAGE
+        runs = [job for job in window if job["family"] == matches[0]]
+        title = "%s in the last %g days" % (matches[0], days)
+        with_family = False
+    if args.json:
+        print(json.dumps([jobview.export_record(job) for job in runs], indent=2, sort_keys=True))
+        return EXIT_OK if runs else EXIT_NO_DATA
+    print(jobview.render_history(runs, title, limit=args.limit, with_family=with_family))
+    if runs and query:
+        last = max(runs, key=lambda job: job.get("end_ts") or 0)
+        print("\nWhat to request next: hpg recommend --like %s" % last.get("job_id"))
+    print(data_line(info["watermark_ts"], now, info["refresh"]))
+    return EXIT_OK if runs else EXIT_NO_DATA
+
+
+def cmd_flags(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    window, _everything, info = _load(args, cfg, now, args.days, args.user, args.kind)
+    if args.json:
+        counts, items = jobview.flagged(window, args.flag)
+        print(
+            json.dumps(
+                {
+                    "jobs": len(window),
+                    "counts": counts,
+                    "families": jobview.flag_groups(items)[: args.limit],
+                    "flagged": [
+                        dict(
+                            jobview.export_record(job),
+                            flag=flag,
+                            detail=jobview.flag_detail(job, flag),
+                        )
+                        for _weight, job, flag in items[: args.limit]
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            jobview.render_flags(
+                window, args.days, only=args.flag, limit=args.limit, per_job=args.jobs
+            )
+        )
+        print(data_line(info["watermark_ts"], now, info["refresh"]))
+    return EXIT_OK if window else EXIT_NO_DATA
+
+
+def cmd_job(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    refresh = collect.maybe_refresh(
+        cfg, enabled=not args.no_refresh, now=now, ingest=_ingest_hook()
+    )
+    with db.reader(cfg.db_path) as conn:
+        found = db.find_jobs(conn, args.job_id)
+        if not found:
+            _err(
+                "hpg job: no stored job %s (a job is stored once it has finished and been "
+                "harvested; 'hpg queue' lists the ones still running)" % args.job_id
+            )
+            return EXIT_NO_DATA
+        job = history.annotate(found[:1], cfg)[0]
+        steps = db.fetch_steps(conn, job["id"])
+        profile = db.fetch_monitor_summary(conn, job["id"])
+        raw = db.fetch_raw(conn, job["id"]) if args.json else None
+        mark = db.get_meta_int(conn, "watermark_ts")
+    if args.json:
+        record = {k: v for k, v in job.items() if k != "m"}
+        record.update(metrics=job["m"], steps=steps, profile=profile, sacct=raw)
+        print(json.dumps(record, indent=2, sort_keys=True))
+    else:
+        print(jobview.render_job(job, steps, profile, others=len(found) - 1))
+        print(data_line(mark, now, refresh))
+    return EXIT_OK
+
+
+def cmd_export(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    days = args.days or cfg.lookback_days
+    window, _everything, _info = _load(args, cfg, now, days, args.user, args.kind)
+    if args.format == "json":
+        text = json.dumps([jobview.export_record(job) for job in window], indent=1, sort_keys=True)
+    else:
+        text = report.to_csv(jobview.EXPORT_COLUMNS, jobview.export_rows(window))
+    _emit(text.rstrip("\n"), args.out)
+    if args.out:
+        _err("%s jobs, %s" % (fmt_int(len(window)), jobview.render_date_range(window)))
+    return EXIT_OK if window else EXIT_NO_DATA
+
+
+def cmd_queue(args: argparse.Namespace, cfg: Config) -> int:
+    now = int(time.time())
+    try:
+        everything, _info = history.load(cfg, since_ts=now - int(cfg.lookback_days * history.DAY))
+    except db.DatabaseMissing:
+        everything = []  # nothing harvested yet: the queue can still be listed
+    try:
+        result = queue.build(cfg, history.History(everything), now)
+    except (collect.HarvestError, ValueError) as exc:
+        _err("hpg queue: %s" % exc)
+        return EXIT_ERROR
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(queue.render_text(result, users=[args.user] if args.user else ()))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -552,6 +787,92 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
     p.set_defaults(func=cmd_recommend, sbatch_args=[])
+
+    def reading(p: argparse.ArgumentParser, days: Optional[float]) -> None:
+        """Options shared by the commands that read stored jobs."""
+        p.add_argument("--user", help="only this user's jobs")
+        if days is None:
+            p.add_argument("--days", type=float, help="window in days (default: lookback_days)")
+        else:
+            p.add_argument(
+                "--days", type=float, default=days, help="window in days (default: %g)" % days
+            )
+        p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
+
+    p = sub.add_parser(
+        "report",
+        help="requested against used: by user, by kind of job, and where the unused part is",
+    )
+    reading(p, 30)
+    p.add_argument("--kind", help="only jobs of this kind (batch, wrap, vscode, ood:<app>, ...)")
+    p.add_argument("--top", type=int, default=10, help="families listed per section (default: 10)")
+    p.add_argument(
+        "--format",
+        choices=("text", "md", "json", "csv"),
+        default="text",
+        help="md for pasting into a message, csv for one line per job family",
+    )
+    p.add_argument("--out", metavar="FILE", help="write to a file instead of the terminal")
+    p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("families", help="job families: runs, requests and use, one line each")
+    reading(p, None)
+    p.add_argument("--kind", help="only families of this kind")
+    p.add_argument(
+        "--sort",
+        choices=sorted(report.FAMILY_SORTS),
+        default="cores",
+        help="cores: core-hours reserved; memory, cpu: unused resource-hours (default: cores)",
+    )
+    p.add_argument("-n", "--limit", type=int, default=40, help="lines to print; 0 for all")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_families)
+
+    p = sub.add_parser(
+        "history",
+        help="the runs of one job family (or your recent jobs), each with requested and used",
+    )
+    p.add_argument(
+        "family",
+        nargs="?",
+        help="a family, a job name, or a fragment of either (default: your jobs)",
+    )
+    reading(p, None)
+    p.add_argument("-n", "--limit", type=int, default=25, help="runs to list (default: 25)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser("flags", help="flagged jobs, largest first, with what was measured")
+    reading(p, 30)
+    p.add_argument("--kind", help="only jobs of this kind")
+    p.add_argument("--flag", choices=metrics.ACCOUNTING_FLAGS, help="only this flag")
+    p.add_argument("--jobs", action="store_true", help="list single jobs instead of families")
+    p.add_argument("-n", "--limit", type=int, default=30, help="lines to list (default: 30)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_flags)
+
+    p = sub.add_parser("job", help="one finished job: requested, used, steps, flags")
+    p.add_argument("job_id", help="job id as Slurm prints it: 123, 123_4")
+    p.add_argument(
+        "--json", action="store_true", help="everything stored, including the sacct record"
+    )
+    p.add_argument("--no-refresh", action="store_true", help="do not query sacct first")
+    p.set_defaults(func=cmd_job)
+
+    p = sub.add_parser("export", help="one line per job, stored and derived values, as CSV or JSON")
+    reading(p, None)
+    p.add_argument("--kind", help="only jobs of this kind")
+    p.add_argument("--format", choices=("csv", "json"), default="csv")
+    p.add_argument("--out", metavar="FILE", help="write to a file instead of the terminal")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser(
+        "queue",
+        help="pending and running jobs next to what their family has used so far",
+    )
+    p.add_argument("--user", help="list only this user's jobs")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_queue)
 
     p = sub.add_parser(
         "backtest",

@@ -471,6 +471,15 @@ class TestSeveralNodes:
         assert self.once(tmp_path / "b", monkeypatch, "--fan-out") is True
         assert self.once(tmp_path / "c", monkeypatch, "--fan-out", "--no-fan-out") is False
 
+    def test_sampler_on_another_node_needs_the_jobs_cgroup(self, tmp_path):
+        """Started there through srun it has no process tree of the job to follow."""
+        args = sampler.build_parser().parse_args(
+            ["--spool", str(tmp_path), "--job", "5", "--no-fan-out", "--skip-node", "c1",
+             "--cgroup-root", str(tmp_path / "no-cgroups")]
+        )  # fmt: skip
+        assert sampler.run(args, {"SLURMD_NODENAME": "c2"}) == 0
+        assert list(tmp_path.iterdir()) == []
+
     def test_sampler_on_the_batch_node_starts_one_on_each_other_node(self, tmp_path, monkeypatch):
         calls = tmp_path / "srun.calls"
         fake = tmp_path / "bin" / "srun"

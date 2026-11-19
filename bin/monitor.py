@@ -755,6 +755,11 @@ def run(args, environ=None):
     source = find_source(os.getpid(), job_id, args.proc_root, args.cgroup_root, tree_root=watch)
     if source is None:
         return 0
+    if args.skip_node and source.name == "proc":
+        # Started on another node by the batch node's sampler. Without a cgroup
+        # there is no process tree of the job to follow from here: only this
+        # process itself. Leave rather than write an empty series.
+        return 0
     try:
         fd, _path = open_series(args.spool, job_id, node)
     except OSError:

@@ -4,9 +4,11 @@ import gzip
 import json
 import os
 import pwd
+import sqlite3
 import time
 
 import pytest
+from helpers import deadline
 from sacct_fixture import simple_job
 
 from lib import collect, db, history, profile
@@ -15,6 +17,8 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 T0 = 1_794_000_000
 ME = pwd.getpwuid(os.getuid()).pw_name
+# An account that exists on every system and is not the one running the tests.
+OTHER = "nobody" if ME != "nobody" else "daemon"
 
 COLUMNS = (
     "t", "mem", "usage", "usage_peak", "cpu", "nproc", "threads", "rd", "wr", "gpu_util", "gpu_mem",
@@ -227,8 +231,17 @@ def spool(cfg):
     return cfg.spool_dir
 
 
-def harvest(cfg, now):
-    return collect.harvest(cfg, now=now, log=lambda _m: None, ingest=profile.ingest_spool)
+def harvest(cfg, now, log=lambda _m: None):
+    return collect.harvest(cfg, now=now, log=log, ingest=profile.ingest_spool)
+
+
+def everything_stored(cfg):
+    """The whole database as text, to prove something is NOT in it."""
+    conn = sqlite3.connect(cfg.db_path)
+    try:
+        return "\n".join(conn.iterdump())
+    finally:
+        conn.close()
 
 
 def stored(cfg):
@@ -287,13 +300,99 @@ class TestIngest:
 
     def test_file_owned_by_someone_else_is_not_believed(self, cfg, stubs, spool, now):
         """The spool is group-writable: anyone could drop a file named after another's job."""
-        stubs.sacct_default(self.job(now, user="someone-else"))
-        self.write(spool, now)
+        stubs.sacct_default(self.job(now, user=OTHER))
+        path = self.write(spool, now)
         messages = []
-        stats = collect.harvest(cfg, now=now, log=messages.append, ingest=profile.ingest_spool)
-        assert stats["n_profiles"] == 0
-        assert any("belongs to someone-else; ignored" in m for m in messages)
+        assert harvest(cfg, now, messages.append)["n_profiles"] == 0
+        assert any("4242.c1.tsv ignored: it is not owned by %s" % OTHER in m for m in messages)
         assert stored(cfg)["4242"]["mon_n_samples"] is None
+        assert os.path.exists(path), "kept while a node of the job may still be writing"
+
+    def test_what_cannot_be_used_is_removed_a_day_after_the_job_ended(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now, user=OTHER, submit=now - 3 * 86400))
+        foreign = self.write(spool, now, start=now - 3 * 86400 + 30)
+        empty = os.path.join(spool, "4242.c2.tsv")
+        with open(empty, "w") as handle:
+            handle.write("not a series\n")
+        harvest(cfg, now)
+        assert not os.path.exists(foreign) and not os.path.exists(empty)
+
+    def test_job_of_a_user_this_node_does_not_know_waits(self, cfg, stubs, spool, now):
+        """A name service that is down must not look like a file with the wrong owner."""
+        stubs.sacct_default(self.job(now, user="no-such-user", submit=now - 3 * 86400))
+        path = self.write(spool, now, start=now - 3 * 86400 + 30)
+        messages = []
+        assert harvest(cfg, now, messages.append)["n_profiles"] == 0
+        assert any("no-such-user is not known on this node" in m for m in messages)
+        assert os.path.exists(path)
+
+    def test_a_link_is_never_followed(self, cfg, stubs, spool, now, tmp_path):
+        """A member links another job's name to a file of the job's user: it is not read."""
+        stubs.sacct_default(self.job(now))
+        elsewhere = self.write(str(tmp_path), now)
+        os.symlink(elsewhere, os.path.join(spool, "4242.c1.tsv"))
+        messages = []
+        assert harvest(cfg, now, messages.append)["n_profiles"] == 0
+        assert any("4242.c1.tsv ignored: it is a symbolic link" in m for m in messages)
+        assert os.path.exists(elsewhere)
+
+    def test_a_second_name_of_a_file_is_not_believed(self, cfg, stubs, spool, now, tmp_path):
+        stubs.sacct_default(self.job(now))
+        elsewhere = self.write(str(tmp_path), now)
+        os.link(elsewhere, os.path.join(spool, "4242.c1.tsv"))
+        messages = []
+        assert harvest(cfg, now, messages.append)["n_profiles"] == 0
+        assert any("it has 2 names" in m for m in messages)
+
+    def test_a_pipe_cannot_stall_the_harvest(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        os.mkfifo(os.path.join(spool, "4242.c1.tsv"))
+        os.mkfifo(os.path.join(spool, "submit", "4242.json"))
+        messages = []
+        with deadline():
+            stats = harvest(cfg, now, messages.append)
+        assert stats["n_inserted"] == 1 and stats["n_profiles"] == 0
+        assert sum("it is not a regular file" in m for m in messages) == 2
+
+    def test_an_oversized_file_is_not_read(self, cfg, stubs, spool, now, monkeypatch):
+        stubs.sacct_default(self.job(now))
+        self.write(spool, now)
+        monkeypatch.setattr(profile, "SERIES_MAX_BYTES", 1000)
+        messages = []
+        assert harvest(cfg, now, messages.append)["n_profiles"] == 0
+        assert any("it is larger than" in m for m in messages)
+
+    def test_node_name_in_a_series_cannot_leave_the_archive_folder(self, cfg, stubs, spool, now):
+        """The node label is taken from the file's content, which its owner writes."""
+        stubs.sacct_default(self.job(now))
+        path = os.path.join(spool, "4242.c1.tsv")
+        with open(path, "w") as handle:
+            handle.write(series_text(steady(30), node="../../../escaped/x", start=now - 3570))
+        assert harvest(cfg, now)["n_profiles"] == 1
+        (archive,) = profile.series_files(cfg, stored(cfg)["4242"])
+        assert os.path.dirname(archive) == cfg.ts_dir
+        assert os.path.basename(archive) == "4242-%d.%sescaped_x.tsv.gz" % (now - 3600, "_" * 9)
+        assert not os.path.exists(os.path.join(cfg.root, "escaped"))
+
+    def test_two_files_claiming_one_node_are_both_kept(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        for name in ("4242.c1.tsv", "4242.c1-99-0.tsv"):
+            with open(os.path.join(spool, name), "w") as handle:
+                handle.write(series_text(steady(30), node="c1", start=now - 3570))
+        assert harvest(cfg, now)["n_profiles"] == 1
+        names = sorted(os.path.basename(p) for p in profile.series_files(cfg, stored(cfg)["4242"]))
+        assert [n.split(".")[1] for n in names] == ["c1", "c1_2"]
+
+    def test_archive_is_readable_like_the_database(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        self.write(spool, now)
+        before = os.umask(0o077)
+        try:
+            harvest(cfg, now)
+        finally:
+            os.umask(before)
+        (archive,) = profile.series_files(cfg, stored(cfg)["4242"])
+        assert oct(os.stat(archive).st_mode & 0o777) == "0o644"
 
     def test_series_from_an_earlier_use_of_the_job_id_is_ignored(self, cfg, stubs, spool, now):
         stubs.sacct_default(self.job(now))
@@ -338,6 +437,64 @@ class TestIngest:
             json.dump({"tools": [], "input_gb": 1, "submitted_ts": now - 40 * 86400}, handle)
         harvest(cfg, now)
         assert stored(cfg)["4242"]["ctx_input_gb"] is None
+
+    def test_link_to_a_private_file_is_not_stored(self, cfg, stubs, spool, now, tmp_path):
+        """The harvest runs as the owner of the database, which every member can read:
+        a link from the owner's own job to one of the owner's files must not be opened."""
+        stubs.sacct_default(self.job(now))
+        secret = tmp_path / "credentials.json"
+        secret.write_text(json.dumps({"token": "s3cr3t-value", "submitted_ts": now - 3600}))
+        os.symlink(str(secret), os.path.join(spool, "submit", "4242.json"))
+        messages = []
+        harvest(cfg, now, messages.append)
+        assert any("4242.json ignored: it is a symbolic link" in m for m in messages)
+        assert "s3cr3t-value" not in everything_stored(cfg)
+        assert stored(cfg)["4242"]["ctx_tools_json"] is None
+
+    def test_only_what_hpg_submit_writes_is_stored(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        with open(os.path.join(spool, "submit", "4242.json"), "w") as handle:
+            json.dump(
+                {
+                    "tools": ["Seurat", 7, "x" * 500],
+                    "input_gb": "a lot",
+                    "script_hash": ["not", "text"],
+                    "submitted_ts": now - 3600,
+                    "cwd": "/blue/lab/" + "d" * 10000,
+                    "password": "hunter2",
+                    "request": {"a": {"b": {"c": {"d": {"e": "too deep"}}}}},
+                },
+                handle,
+            )
+        harvest(cfg, now)
+        job = stored(cfg)["4242"]
+        assert json.loads(job["ctx_tools_json"]) == ["Seurat", "x" * 64]
+        assert job["ctx_input_gb"] is None and job["ctx_script_hash"] is None
+        dump = everything_stored(cfg)
+        assert "hunter2" not in dump and "too deep" not in dump
+        assert "d" * 3990 in dump and "d" * 3991 not in dump, "text is cut at 4000 characters"
+
+    def test_submit_folder_that_is_a_link_is_not_read(self, cfg, stubs, now, tmp_path):
+        stubs.sacct_default(self.job(now))
+        os.makedirs(cfg.spool_dir)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "4242.json").write_text(json.dumps({"tools": ["Seurat"], "input_gb": 3}))
+        os.symlink(str(elsewhere), os.path.join(cfg.spool_dir, "submit"))
+        messages = []
+        harvest(cfg, now, messages.append)
+        assert any("submit records are not read" in m for m in messages)
+        assert stored(cfg)["4242"]["ctx_tools_json"] is None
+
+    def test_file_left_by_a_killed_hpg_submit_is_cleared(self, cfg, stubs, spool, now):
+        stubs.sacct_default(self.job(now))
+        fresh = os.path.join(spool, "submit", ".4243.1.aa.tmp")
+        old = os.path.join(spool, "submit", ".4244.1.bb.tmp")
+        for path in (fresh, old):
+            open(path, "w").close()
+        os.utime(old, (now - 2 * 86400, now - 2 * 86400))
+        harvest(cfg, now)
+        assert os.path.exists(fresh) and not os.path.exists(old)
 
     def test_unreadable_files_do_not_stop_the_harvest(self, cfg, stubs, spool, now):
         stubs.sacct_default(self.job(now))
@@ -385,3 +542,36 @@ class TestSpoolSetup:
         cfg.spool_mode = 0o700
         profile.ensure_spool(cfg, lambda _m: None)
         assert oct(os.stat(cfg.spool_dir).st_mode & 0o7777) == "0o700"
+
+
+class TestReadingASpoolFile:
+    """What 'hpg plot' reads before a profile has been archived."""
+
+    def test_series_of_the_jobs_user(self, tmp_path):
+        path = tmp_path / "1.c1.tsv"
+        path.write_text(series_text(steady(5)))
+        assert len(profile.read_series(str(path), owner=ME)[1]) == 5
+
+    def test_somebody_elses_file_under_the_jobs_name(self, tmp_path):
+        path = tmp_path / "1.c1.tsv"
+        path.write_text(series_text(steady(5)))
+        with pytest.raises(profile.Rejected, match="does not belong to %s" % OTHER):
+            profile.read_series(str(path), owner=OTHER)
+
+    def test_link_and_pipe(self, tmp_path):
+        target = tmp_path / "real.tsv"
+        target.write_text(series_text(steady(5)))
+        os.symlink(str(target), str(tmp_path / "1.c1.tsv"))
+        with pytest.raises(profile.Rejected, match="symbolic link"):
+            profile.read_series(str(tmp_path / "1.c1.tsv"), owner=ME)
+        os.mkfifo(str(tmp_path / "2.c1.tsv"))
+        with deadline(), pytest.raises(profile.Rejected, match="not a regular file"):
+            profile.read_series(str(tmp_path / "2.c1.tsv"), owner=ME)
+
+    def test_archive_may_have_a_second_name(self, tmp_path):
+        """A backup made of hard links must not make archived profiles unreadable."""
+        path = tmp_path / "1-2.c1.tsv.gz"
+        with gzip.open(str(path), "wt") as handle:
+            handle.write(series_text(steady(5)))
+        os.link(str(path), str(tmp_path / "copy.gz"))
+        assert len(profile.read_series(str(path))[1]) == 5

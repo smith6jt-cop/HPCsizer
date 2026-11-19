@@ -8,28 +8,39 @@ what was submitted. Nothing is finalised inside the job. The harvester calls
 the series, compressed, under ``timeseries/``.
 
 The spool is group-writable so that every member's jobs can write to it, which
-also means anyone in the group could put a file there. A file is therefore
-only believed when it is owned by the user the job belongs to.
+also means anyone in the group could put anything there under any name: a file
+of their own, a link to somebody else's file, a pipe. The harvest runs as the
+owner of the database, so an entry is only read when it is a plain file with a
+single name that belongs to the user the job belongs to; it is opened without
+following links, its size is bounded, and what is stored from it is limited to
+what the sampler and ``hpg submit`` write.
 """
 
+import errno
 import glob
 import gzip
 import json
+import math
 import os
 import pwd
+import re
+import stat
 import statistics
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from lib import db
 from lib.config import Config
-from lib.fmt import fmt_bytes, fmt_num, fmt_pct
+from lib.fmt import clean, fmt_bytes, fmt_num, fmt_pct
 
 Row = Dict[str, Any]
 Series = List[Tuple[float, float]]
 
 ORPHAN_DAYS = 30  # series of jobs that never show up in accounting are removed after this
 START_SLACK_SEC = 600
+GRACE_SEC = 86400  # a spool file that cannot be used is removed this long after its job ended
+SERIES_MAX_BYTES = 64 << 20  # a month of samples is about 10 MB
+CONTEXT_MAX_BYTES = 1 << 20
 
 # Thresholds of the informational notes, as in the previous version.
 IDLE_CORES = 0.05
@@ -90,10 +101,68 @@ def parse_series(text: str) -> Tuple[Dict[str, str], List[Row]]:
     return meta, rows
 
 
-def read_series(path: str) -> Tuple[Dict[str, str], List[Row]]:
-    opener = gzip.open if path.endswith(".gz") else open
-    with opener(path, "rt", errors="replace") as handle:
-        return parse_series(handle.read())
+class Rejected(OSError):
+    """A spool entry that is not what a job's sampler or ``hpg submit`` leaves there."""
+
+
+def read_plain_file(path: str, limit: int, single_name: bool = True) -> Tuple[bytes, int, float]:
+    """``(content, owner uid, mtime)`` of a plain file, read without trusting the name.
+
+    Links are not followed, a pipe cannot block the caller, and nothing beyond
+    ``limit`` bytes is read. Raises ``Rejected`` for anything that is not a
+    regular file (with one name, when ``single_name``) of at most ``limit``
+    bytes, and ``OSError`` when it cannot be read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise Rejected("it is a symbolic link") from None
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Rejected("it is not a regular file")
+        if single_name and info.st_nlink != 1:
+            raise Rejected("it has %d names" % info.st_nlink)
+        chunks = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(fd, min(1 << 20, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > limit:
+            raise Rejected("it is larger than %s" % fmt_bytes(limit))
+        return b"".join(chunks), info.st_uid, info.st_mtime
+    finally:
+        os.close(fd)
+
+
+def uid_of(user: Optional[str]) -> Optional[int]:
+    """The uid of a user name as accounting reports it, or None when it cannot be resolved."""
+    if not user:
+        return None
+    try:
+        return pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return int(user) if user.isdigit() else None
+
+
+def read_series(path: str, owner: Optional[str] = None) -> Tuple[Dict[str, str], List[Row]]:
+    """``(meta, rows)`` of a series file: an archive, or a file still in the spool.
+
+    With ``owner``, the file must belong to that user -- which is what makes a
+    file in the group-writable spool believable. Raises ``OSError``.
+    """
+    archived = path.endswith(".gz")
+    data, uid, _mtime = read_plain_file(path, SERIES_MAX_BYTES, single_name=not archived)
+    if owner is not None and uid != uid_of(owner):
+        raise Rejected("%s does not belong to %s" % (os.path.basename(path), owner))
+    if archived:
+        data = gzip.decompress(data)
+    return parse_series(data.decode("utf-8", "replace"))
 
 
 # ---------------------------------------------------------------------------
@@ -493,30 +562,61 @@ def series_files(cfg: Config, job: Dict[str, Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def _owner(path: str) -> Optional[str]:
-    try:
-        return pwd.getpwuid(os.stat(path).st_uid).pw_name
-    except (OSError, KeyError):
-        return None
+_UNSAFE_IN_NODE = re.compile(r"[^A-Za-z0-9_-]")
+_CONTEXT_KEYS = (
+    "job_id",
+    "submitted_ts",
+    "user",
+    "cwd",
+    "hpcsizer",
+    "profiled",
+    "applied",
+    "script_hash",
+    "tools",
+    "input_gb",
+    "inputs",
+    "language",
+    "submit_line",
+    "request",
+    "array",
+    "suggested",
+)
+
+
+def safe_node(name: Any) -> str:
+    """A node name fit to be part of a file name: no separators, no dots, bounded."""
+    return _UNSAFE_IN_NODE.sub("_", str(name or ""))[:64]
 
 
 def _remove(path: str) -> None:
     try:
-        os.unlink(path)
+        os.unlink(path)  # a link is removed, never what it points to
     except OSError:
         pass
 
 
-def _archive(cfg: Config, src: str, job_id_raw: int, submit_ts: Optional[int], node: str) -> str:
+def _age(path: str, now: int) -> Optional[float]:
+    try:
+        return now - os.lstat(path).st_mtime
+    except OSError:
+        return None
+
+
+def _remove_orphan(path: str, now: int) -> None:
+    age = _age(path, now)
+    if age is not None and age > ORPHAN_DAYS * 86400:
+        _remove(path)
+
+
+def _archive(cfg: Config, data: bytes, job_id_raw: int, submit_ts: Optional[int], node: str) -> str:
+    """Store one node's series, compressed. ``data`` is what was read and checked, not a path."""
     os.makedirs(cfg.ts_dir, exist_ok=True)
-    dst = os.path.join(cfg.ts_dir, "%d-%d.%s.tsv.gz" % (int(job_id_raw), int(submit_ts or 0), node))
+    name = "%d-%d.%s.tsv.gz" % (int(job_id_raw), int(submit_ts or 0), safe_node(node) or "node")
+    dst = os.path.join(cfg.ts_dir, name)
     tmp = dst + ".tmp"
-    with open(src, "rb") as source, gzip.open(tmp, "wb") as target:
-        while True:
-            chunk = source.read(1 << 20)
-            if not chunk:
-                break
-            target.write(chunk)
+    with gzip.open(tmp, "wb") as target:
+        target.write(data)
+    os.chmod(tmp, 0o644)  # like the database: readable by whoever can reach the directory
     os.replace(tmp, dst)
     return dst
 
@@ -528,11 +628,7 @@ def _ingest_series(
     if row is None:
         # Not finished, not harvested yet, or not a job of this account.
         for path in paths:
-            try:
-                if now - os.stat(path).st_mtime > ORPHAN_DAYS * 86400:
-                    _remove(path)
-            except OSError:
-                pass
+            _remove_orphan(path, now)
         return False
     if db.has_monitor(conn, row["id"]):
         # Stored by an earlier harvest, and that harvest was published: the spool copy can go.
@@ -541,31 +637,43 @@ def _ingest_series(
                 _remove(path)
         return False
 
+    # What cannot be used is left for a day after the job ended (a node may
+    # still be writing), then removed, so that it is not read again every hour.
+    settled = now - (row["end_ts"] or now) > GRACE_SEC
+    after = (row["submit_ts"] or 0) - START_SLACK_SEC
+    before = (row["end_ts"] or now) + START_SLACK_SEC
+    owner_uid = uid_of(row["user"])
     series = []
-    kept = []
+    kept: List[Tuple[str, bytes, str]] = []
+    labels: Dict[str, int] = {}
     for path in paths:
-        owner = _owner(path)
-        if owner != row["user"]:
-            log(
-                "[profile] %s is owned by %s but job %s belongs to %s; ignored"
-                % (os.path.basename(path), owner, job_id, row["user"])
-            )
-            continue
+        name = os.path.basename(path)
         try:
-            meta, rows = read_series(path)
+            if owner_uid is None:
+                raise OSError("user %s is not known on this node" % row["user"])
+            data, uid, _mtime = read_plain_file(path, SERIES_MAX_BYTES)
+            if uid != owner_uid:
+                raise Rejected("it is not owned by %s, whose job %s is" % (row["user"], job_id))
+        except Rejected as exc:
+            log("[profile] %s ignored: %s" % (name, exc))
+            if settled:
+                _remove(path)
+            continue
         except OSError as exc:
             log("[profile] cannot read %s: %s" % (path, exc))
             continue
-        if not rows:
+        meta, rows = parse_series(data.decode("utf-8", "replace"))
+        if not rows or not after <= rows[0]["t"] <= before:
+            if settled:  # nothing recorded, or an earlier use of this job id
+                _remove(path)
             continue
-        started = rows[0]["t"]
-        after = (row["submit_ts"] or 0) - START_SLACK_SEC
-        before = (row["end_ts"] or now) + START_SLACK_SEC
-        if not after <= started <= before:
-            continue  # an earlier use of this job id
-        meta.setdefault("node", (split_name(path) or ("", "?"))[1])
+        node = safe_node(meta.get("node")) or safe_node((split_name(path) or ("", ""))[1]) or "node"
+        labels[node] = labels.get(node, 0) + 1
+        if labels[node] > 1:
+            node = "%s_%d" % (node, labels[node])
+        meta["node"] = node
         series.append((meta, rows))
-        kept.append((path, meta["node"]))
+        kept.append((path, data, node))
     summary = summarize(
         series,
         job_start_ts=row["start_ts"],
@@ -573,12 +681,41 @@ def _ingest_series(
         alloc_cpus=row["alloc_cpus"],
     )
     if summary is None:
+        if settled:
+            for path, _data, _node in kept:
+                _remove(path)
         return False
-    for path, node in kept:
-        _archive(cfg, path, int(job_id), row["submit_ts"], node)
+    for _path, data, node in kept:
+        _archive(cfg, data, int(job_id), row["submit_ts"], node)
     summary["series_path"] = archive_pattern(cfg, int(job_id), row["submit_ts"])
     db.upsert_monitor(conn, row["id"], summary, now)
     return True
+
+
+def _bounded(value: Any, depth: int = 0) -> Any:
+    """``value`` reduced to plain JSON of limited size and depth."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < 1 << 63 else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value[:4000]
+    if depth >= 4:
+        return None
+    if isinstance(value, list):
+        return [_bounded(item, depth + 1) for item in value[:200]]
+    if isinstance(value, dict):
+        return {
+            str(key)[:200]: _bounded(item, depth + 1) for key, item in list(value.items())[:100]
+        }
+    return None
+
+
+def clean_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """The fields ``hpg submit`` writes, and nothing else that a file may contain."""
+    return {key: _bounded(ctx[key]) for key in _CONTEXT_KEYS if key in ctx}
 
 
 def _ingest_context(conn, cfg: Config, path: str, now: int, log: Callable[[str], None]) -> bool:
@@ -586,35 +723,44 @@ def _ingest_context(conn, cfg: Config, path: str, now: int, log: Callable[[str],
     name = os.path.basename(path)[: -len(".json")]
     if not name.isdigit():
         return False
-    try:
-        age = now - os.stat(path).st_mtime
-    except OSError:
+    age = _age(path, now)
+    if age is None:
         return False
     rows = db.jobs_of_submission(conn, int(name))
     if not rows:
         if age > ORPHAN_DAYS * 86400:
             _remove(path)
         return False
-    if _owner(path) != rows[0]["user"]:
-        log("[profile] %s is not owned by %s; ignored" % (name + ".json", rows[0]["user"]))
-        return False
+    owner_uid = uid_of(rows[0]["user"])
     try:
-        with open(path) as handle:
-            ctx = json.load(handle)
-    except (OSError, ValueError) as exc:
+        if owner_uid is None:
+            raise OSError("user %s is not known on this node" % rows[0]["user"])
+        data, uid, _mtime = read_plain_file(path, CONTEXT_MAX_BYTES)
+        if uid != owner_uid:
+            raise Rejected("it is not owned by %s" % rows[0]["user"])
+        ctx = json.loads(data.decode("utf-8", "replace"))
+        if not isinstance(ctx, dict):
+            raise Rejected("it is not a submit record")
+    except (Rejected, ValueError, RecursionError) as exc:
+        log("[profile] %s.json ignored: %s" % (name, exc))
+        if age > GRACE_SEC:
+            _remove(path)
+        return False
+    except OSError as exc:
         log("[profile] cannot read %s: %s" % (path, exc))
         return False
-    if not isinstance(ctx, dict):
-        return False
+    ctx = clean_context(ctx)
     submitted = ctx.get("submitted_ts")
-    try:
-        input_gb = float(ctx.get("input_gb")) if ctx.get("input_gb") is not None else None
-    except (TypeError, ValueError):
+    input_gb = ctx.get("input_gb")
+    if isinstance(input_gb, bool) or not isinstance(input_gb, (int, float)) or input_gb < 0:
         input_gb = None
+    tools = ctx.get("tools")
+    tools = [t[:64] for t in tools[:50] if isinstance(t, str)] if isinstance(tools, list) else []
+    script_hash = ctx.get("script_hash")
     record = {
-        "script_hash": ctx.get("script_hash"),
-        "tools_json": json.dumps(ctx.get("tools") or []),
-        "input_gb": input_gb,
+        "script_hash": script_hash[:128] if isinstance(script_hash, str) else None,
+        "tools_json": json.dumps(tools),
+        "input_gb": float(input_gb) if input_gb is not None else None,
         "detail_json": json.dumps(ctx, sort_keys=True),
     }
     stored = pending = 0
@@ -634,6 +780,15 @@ def _ingest_context(conn, cfg: Config, path: str, now: int, log: Callable[[str],
     return bool(stored)
 
 
+def _is_own_dir(path: str, owner_uid: int) -> bool:
+    """True when ``path`` itself (not something it links to) is a directory of ``owner_uid``."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == owner_uid
+
+
 def ensure_spool(cfg: Config, log: Callable[[str], None] = print) -> bool:
     """Create the spool (and its ``submit`` folder) if it is missing. True when it exists.
 
@@ -641,22 +796,44 @@ def ensure_spool(cfg: Config, log: Callable[[str], None] = print) -> bool:
     other permissions.
     """
     created = False
-    for folder in (cfg.spool_dir, os.path.join(cfg.spool_dir, "submit")):
-        if os.path.isdir(folder):
-            continue
-        try:
-            os.makedirs(folder, exist_ok=True)
-            os.chmod(folder, cfg.spool_mode)  # explicitly: mkdir's mode is cut by the umask
+    submit = os.path.join(cfg.spool_dir, "submit")
+    try:
+        if not os.path.isdir(cfg.spool_dir):
+            os.makedirs(cfg.spool_dir, exist_ok=True)
+            os.chmod(cfg.spool_dir, cfg.spool_mode)  # explicitly: mkdir's mode is cut by the umask
             created = True
-        except OSError as exc:
-            log("[profile] cannot create %s: %s" % (folder, exc))
-            return False
+        if not os.path.lexists(submit):
+            os.mkdir(submit)
+            os.chmod(submit, cfg.spool_mode)
+            created = True
+    except OSError as exc:
+        log("[profile] cannot create the spool %s: %s" % (cfg.spool_dir, exc))
+        return os.path.isdir(cfg.spool_dir)
     if created:
         log(
             "[profile] created the spool %s (mode %o): jobs submitted with 'hpg submit' "
             "write their profiles there" % (cfg.spool_dir, cfg.spool_mode)
         )
     return True
+
+
+def submit_folder(cfg: Config, log: Callable[[str], None] = print) -> Optional[str]:
+    """The folder ``hpg submit`` writes to, when it can be believed: a real directory of the
+    spool's owner. In a group-writable spool anything else could have been put there by anyone.
+    """
+    folder = os.path.join(cfg.spool_dir, "submit")
+    try:
+        owner = os.stat(cfg.spool_dir).st_uid
+    except OSError:
+        return None
+    if not _is_own_dir(folder, owner):
+        if os.path.lexists(folder):
+            log(
+                "[profile] %s is not a directory owned by the spool's owner; "
+                "submit records are not read" % folder
+            )
+        return None
+    return folder
 
 
 def ingest_spool(
@@ -682,11 +859,18 @@ def ingest_spool(
             stored += bool(_ingest_series(conn, cfg, job_id, paths, now, log))
         except Exception as exc:  # noqa: BLE001 - one bad file must not stop the harvest
             log("[profile] job %s: %s" % (job_id, exc))
-    for path in sorted(glob.glob(os.path.join(cfg.spool_dir, "submit", "*.json"))):
+    folder = submit_folder(cfg, log)
+    if folder is None:
+        return stored
+    for path in sorted(glob.glob(os.path.join(folder, "*.json"))):
         try:
             _ingest_context(conn, cfg, path, now, log)
         except Exception as exc:  # noqa: BLE001
             log("[profile] %s: %s" % (os.path.basename(path), exc))
+    for path in glob.glob(os.path.join(folder, ".*.tmp")):
+        age = _age(path, now)  # left by an 'hpg submit' that was killed while writing
+        if age is not None and age > GRACE_SEC:
+            _remove(path)
     return stored
 
 
@@ -699,7 +883,7 @@ def describe(summary: Dict[str, Any]) -> List[str]:
             lines.append(
                 "%s: peak memory %s, %s cores on average"
                 % (
-                    node.get("node"),
+                    clean(node.get("node")),
                     fmt_bytes(node.get("peak_mem_bytes")),
                     fmt_num(node.get("avg_cores")),
                 )

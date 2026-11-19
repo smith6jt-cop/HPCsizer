@@ -308,10 +308,27 @@ and says when there are others.
 | `profiles.db`, `timeseries/` | members: read |
 | `spool/`, `spool/submit/` | members: write. Created by the first harvest with mode 3770 — group-writable, setgid, sticky: members' jobs can add files, nobody can remove another's. |
 
-A file in the spool is only used when its owner is the user the job belongs to
-according to Slurm, so a member cannot attach a made-up profile to someone
-else's job. To profile only your own jobs, set `spool_mode = 0700` under
-`[profile]` before the first harvest (or `chmod` the existing directory).
+Every member can write to the spool, so any member can put anything there
+under any name. Nothing in it is trusted because of its name:
+
+- The harvest, which runs as you, opens a spool entry without following links
+  and reads it only if it is a plain file with a single name whose owner is the
+  user the job belongs to according to Slurm. So a member cannot attach a
+  made-up profile to someone else's job, cannot make the harvest read a file of
+  yours through a link, and cannot stall it with a pipe or exhaust it with a
+  huge file (series are read up to 64 MB, submit records up to 1 MB). From a
+  submit record only the fields `hpg submit` writes are stored. What is
+  rejected is named in the harvest log and removed a day after its job ended.
+- The sampler, which runs as the job's user, creates its file exclusively and
+  never writes through a link or into a file that is not a plain file of that
+  user; if the name is taken it writes to `<jobid>.<node>-<pid>-<n>.tsv`.
+  `hpg submit` writes its record to a new file and renames it into place.
+- `spool/submit/` is created by the harvest only, and is used only while it is
+  a real directory that belongs to the owner of the spool.
+
+Keep the sticky bit: without it members could remove or replace each other's
+files. To profile only your own jobs, set `spool_mode = 0700` under `[profile]`
+before the first harvest (or `chmod` the existing directory).
 
 ## Profiling
 
@@ -372,7 +389,8 @@ check:
 | Check | Assumption | If it does not hold |
 |---|---|---|
 | interpreter | Python ≥ 3.9 and SQLite ≥ 3.24 on the login node | set `HPCSIZER_PYTHON` for the scheduled job |
-| sacct query | every requested field and the field separator are accepted | FAIL names the field; report it |
+| sacct fields | this version of `sacct` has every field HPCsizer stores | WARN names the fields it lacks; they are left out of the query and stored as unknown (Slurm 23.11, for one, has no `Restarts`) |
+| sacct query | the query and the field separator are accepted | FAIL shows sacct's message; report it |
 | epoch timestamps | `SLURM_TIME_FORMAT=%s` is honoured | WARN: ISO times are then read as UTC, which the query also sets |
 | other members visible | `sacct -a` returns other users' jobs | WARN: only your jobs can be collected; ask the administrators about `PrivateData` |
 | value forms | `TotalCPU` and `MaxRSS` are in a known form | FAIL shows the value |

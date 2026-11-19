@@ -448,3 +448,73 @@ class TestWholeLoop:
         assert job["mon_peak_mem_bytes"] > 50 * 1024 * 1024
         assert job["metrics"]["mem_source"] == "profile", "a 4-second job accounting cannot measure"
         assert json.loads(job["ctx_tools_json"]) == ["time"] and job["ctx_script_hash"]
+
+
+class TestContextFile:
+    """What 'hpg submit' leaves for the harvester, in a folder the whole group can write to."""
+
+    @pytest.fixture
+    def folder(self, conf):
+        path = os.path.join(conf.spool_dir, "submit")
+        os.mkdir(path)
+        return path
+
+    def test_written_group_readable_whatever_the_umask(self, conf, folder):
+        before = os.umask(0o077)
+        try:
+            path = submit.write_context(conf, "777", {"tools": ["Seurat"]})
+        finally:
+            os.umask(before)
+        assert path == os.path.join(folder, "777.json")
+        assert json.load(open(path)) == {"tools": ["Seurat"]}
+        assert oct(os.stat(path).st_mode & 0o777) == "0o640"
+        assert os.listdir(folder) == ["777.json"], "no temporary file is left"
+
+    def test_link_under_the_jobs_name_is_never_written_through(self, conf, folder, tmp_path):
+        """A member plants links for the next job ids, pointing at a file of the submitter."""
+        victim = tmp_path / "thesis.tex"
+        victim.write_text("three years of work\n")
+        victim.chmod(0o600)
+        os.symlink(str(victim), os.path.join(folder, "777.json"))
+        path = submit.write_context(conf, "777", {"tools": []})
+        assert victim.read_text() == "three years of work\n"
+        assert oct(victim.stat().st_mode & 0o777) == "0o600"
+        # Here the folder is not sticky, so the link itself is replaced by the record.
+        assert path and not os.path.islink(path) and json.load(open(path)) == {"tools": []}
+
+    def test_dangling_link_does_not_create_its_target(self, conf, folder, tmp_path):
+        target = tmp_path / "appears-in-your-home"
+        os.symlink(str(target), os.path.join(folder, "777.json"))
+        submit.write_context(conf, "777", {})
+        assert not target.exists()
+
+    def test_record_that_cannot_be_put_in_place_leaves_nothing_behind(
+        self, conf, folder, monkeypatch
+    ):
+        def refuse(*_args, **_kwargs):
+            raise PermissionError("sticky folder: the name belongs to somebody else")
+
+        monkeypatch.setattr(submit.os, "replace", refuse)
+        assert submit.write_context(conf, "777", {}) is None
+        assert os.listdir(folder) == []
+
+    def test_folder_is_only_ever_created_by_the_harvest(self, conf):
+        assert submit.write_context(conf, "777", {}) is None
+        assert not os.path.exists(os.path.join(conf.spool_dir, "submit"))
+
+    def test_folder_that_is_a_link_is_not_used(self, conf, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        os.symlink(str(elsewhere), os.path.join(conf.spool_dir, "submit"))
+        assert submit.write_context(conf, "777", {}) is None
+        assert os.listdir(str(elsewhere)) == []
+
+    @pytest.mark.skipif(os.getuid() != 0, reason="needs root to give the folder to another user")
+    def test_folder_of_somebody_other_than_the_spools_owner_is_not_used(self, conf, folder):
+        os.chown(folder, 65534, -1)
+        assert submit.write_context(conf, "777", {}) is None
+        assert os.listdir(folder) == []
+
+    def test_job_id_must_be_a_number(self, conf, folder):
+        assert submit.write_context(conf, "../777", {}) is None
+        assert os.listdir(folder) == [] and os.listdir(conf.spool_dir) == ["submit"]

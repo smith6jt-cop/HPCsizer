@@ -207,19 +207,30 @@ def preflight(
     )
 
     # The exact query the collector runs, over two days.
-    cmd = slurm.build_sacct_cmd(cfg.accounts, now - 2 * DAY, None, sacct=cfg.sacct)
+    fields, lacking = collect.sacct_fields(cfg)
+    if lacking:
+        checks.append(
+            _check(
+                "sacct fields",
+                WARN,
+                "this sacct has no %s: stored as unknown, the rest is collected"
+                % ", ".join(lacking),
+            )
+        )
+    cmd = slurm.build_sacct_cmd(cfg.accounts, now - 2 * DAY, None, sacct=cfg.sacct, fields=fields)
     code, out, err = _run(cmd, timeout=300, env=slurm.sacct_env())
     rows: List[Dict[str, str]] = []
     if code != 0:
         checks.append(_check("sacct query", FAIL, (err.strip().splitlines() or ["failed"])[-1]))
     else:
         try:
-            rows = slurm.records_to_dicts(slurm.split_records(out))
+            rows = slurm.records_to_dicts(slurm.split_records(out, nfields=len(fields)), fields)
             checks.append(
                 _check(
                     "sacct query",
                     PASS,
-                    "%d records, all fields and the separator accepted" % len(rows),
+                    "%d records, %s and the separator accepted"
+                    % (len(rows), "the fields asked for" if lacking else "all fields"),
                 )
             )
         except slurm.SacctFormatError as exc:
@@ -267,7 +278,7 @@ def preflight(
                 ),
             )
         )
-        wraps = [r["SubmitLine"] for r in job_rows if "--wrap" in r.get("SubmitLine", "")]
+        wraps = [r["SubmitLine"] for r in job_rows if "--wrap" in (r.get("SubmitLine") or "")]
         sample = (
             wraps[0]
             if wraps
@@ -301,12 +312,14 @@ def preflight(
         )
 
     # What `hpg queue` asks: jobs that are pending or running right now.
-    code, out, err = _run(queue.open_jobs_cmd(cfg), timeout=300, env=slurm.sacct_env())
+    code, out, err = _run(queue.open_jobs_cmd(cfg, fields), timeout=300, env=slurm.sacct_env())
     if code == 0:
         try:
             open_rows = [
                 r
-                for r in slurm.records_to_dicts(slurm.split_records(out))
+                for r in slurm.records_to_dicts(
+                    slurm.split_records(out, nfields=len(fields)), fields
+                )
                 if "." not in r.get("JobIDRaw", "") and slurm.is_open(r)
             ]
             checks.append(

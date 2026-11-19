@@ -20,6 +20,7 @@ from lib.slurm import (  # noqa: E402
     is_open,
     merge_job,
     parse_duration,
+    parse_field_list,
     parse_jobid,
     parse_mem,
     parse_state,
@@ -29,6 +30,7 @@ from lib.slurm import (  # noqa: E402
     records_to_dicts,
     sacct_env,
     split_records,
+    supported_fields,
     tres_gpus,
     tres_mem_bytes,
 )
@@ -395,3 +397,36 @@ class TestIsOpen:
     def test_final_state_without_an_end_time_waits(self):
         """slurmdbd can report the state before the end time; wait for both."""
         assert is_open(job_row(604, state="COMPLETED", ended=False))
+
+
+class TestFieldsOfThisSacct:
+    """sacct refuses a query that names a field its version does not have."""
+
+    HELP = "Account             AdminComment        AllocCPUS           AllocNodes\nJobID  JobIDRaw"
+
+    def test_field_list_as_helpformat_prints_it(self):
+        assert parse_field_list(self.HELP) == {
+            "account", "admincomment", "alloccpus", "allocnodes", "jobid", "jobidraw"
+        }  # fmt: skip
+
+    def test_everything_is_asked_for_when_the_list_is_unknown(self):
+        assert supported_fields(None) == (FIELDS, ())
+
+    def test_a_field_this_version_lacks_is_left_out(self):
+        have = [name.upper() for name in FIELDS if name not in ("Restarts", "SubmitLine")]
+        kept, lacking = supported_fields(have)
+        assert lacking == ("Restarts", "SubmitLine")
+        assert kept == tuple(n for n in FIELDS if n not in lacking), "order is kept"
+
+    def test_an_answer_that_is_not_a_field_list_is_not_believed(self):
+        assert supported_fields(["usage:", "sacct", "[options]"]) == (FIELDS, ())
+        assert supported_fields([]) == (FIELDS, ())
+
+    def test_a_record_without_optional_fields_still_merges(self):
+        job, *steps = simple_job(7)
+        for row in [job] + steps:
+            for name in ("Restarts", "SubmitLine", "TRESUsageInTot", "DerivedExitCode", "QOS"):
+                del row[name]
+        record, _steps = merge_job(job, steps)
+        assert record["job_id_raw"] == 7 and record["restarts"] is None
+        assert record["submit_line"] is None and record["qos"] is None

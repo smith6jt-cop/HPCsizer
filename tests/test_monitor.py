@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import pytest
+from helpers import deadline
 
 from lib import profile
 
@@ -313,6 +314,107 @@ class TestAsAProcess:
 
     def test_runs_on_the_python_of_old_compute_nodes(self):
         ast.parse(SAMPLER.read_text(), feature_version=(3, 6))
+
+
+class TestSeriesFile:
+    """The spool is writable by the whole group: the name a job would use may be taken."""
+
+    def test_new_file_is_group_readable_whatever_the_umask(self, tmp_path):
+        before = os.umask(0o077)
+        try:
+            fd, path = sampler.open_series(str(tmp_path), "4242", "c1")
+        finally:
+            os.umask(before)
+        os.close(fd)
+        assert path == str(tmp_path / "4242.c1.tsv")
+        assert oct(os.stat(path).st_mode & 0o777) == "0o640"
+
+    def test_requeued_job_appends_to_its_own_file(self, tmp_path):
+        fd, path = sampler.open_series(str(tmp_path), "4242", "c1")
+        sampler.write_line(fd, "first run")
+        os.close(fd)
+        fd, again = sampler.open_series(str(tmp_path), "4242", "c1")
+        sampler.write_line(fd, "second run")
+        os.close(fd)
+        assert again == path and open(path).read() == "first run\nsecond run\n"
+
+    def test_link_to_one_of_the_users_files_is_not_written_through(self, tmp_path):
+        """Somebody links the name to a file of the job's user: appending to it would damage
+        that file, and the chmod would open a private one to the group."""
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        private = tmp_path / "private.txt"
+        private.write_text("mine\n")
+        private.chmod(0o600)
+        os.symlink(str(private), str(spool / "4242.c1.tsv"))
+        fd, path = sampler.open_series(str(spool), "4242", "c1")
+        sampler.write_line(fd, "sample")
+        os.close(fd)
+        assert private.read_text() == "mine\n"
+        assert oct(private.stat().st_mode & 0o777) == "0o600"
+        assert os.path.basename(path) == "4242.c1-%d-0.tsv" % os.getpid()
+        assert open(path).read() == "sample\n" and not os.path.islink(path)
+
+    def test_dangling_link_does_not_create_its_target(self, tmp_path):
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        target = tmp_path / "new-file-in-your-home"
+        os.symlink(str(target), str(spool / "4242.c1.tsv"))
+        fd, path = sampler.open_series(str(spool), "4242", "c1")
+        os.close(fd)
+        assert not target.exists() and path != str(spool / "4242.c1.tsv")
+
+    def test_second_name_of_one_of_the_users_files_is_not_written_to(self, tmp_path):
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        data = tmp_path / "results.tsv"
+        data.write_text("precious\n")
+        os.link(str(data), str(spool / "4242.c1.tsv"))
+        fd, path = sampler.open_series(str(spool), "4242", "c1")
+        sampler.write_line(fd, "sample")
+        os.close(fd)
+        assert data.read_text() == "precious\n" and path != str(spool / "4242.c1.tsv")
+
+    def test_somebody_elses_file_under_the_name(self, tmp_path, monkeypatch):
+        fd, taken = sampler.open_series(str(tmp_path), "4242", "c1")
+        os.close(fd)
+        monkeypatch.setattr(sampler.os, "geteuid", lambda: os.getuid() + 1)
+        fd, path = sampler.open_series(str(tmp_path), "4242", "c1")
+        os.close(fd)
+        assert path != taken and open(taken).read() == ""
+
+    def test_pipe_under_the_name_cannot_hold_the_sampler(self, tmp_path):
+        os.mkfifo(str(tmp_path / "4242.c1.tsv"))
+        reader = os.open(str(tmp_path / "4242.c1.tsv"), os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            with deadline():
+                fd, path = sampler.open_series(str(tmp_path), "4242", "c1")
+        finally:
+            os.close(reader)
+        os.close(fd)
+        assert path == str(tmp_path / ("4242.c1-%d-0.tsv" % os.getpid()))
+
+    def test_names_are_made_of_safe_characters_only(self, tmp_path):
+        fd, path = sampler.open_series(str(tmp_path), "4242", "../evil node")
+        os.close(fd)
+        assert path == str(tmp_path / "4242.___evil_node.tsv")
+        with pytest.raises(OSError):
+            sampler.open_series(str(tmp_path), "../4242", "c1")
+        with pytest.raises(OSError):
+            sampler.open_series(str(tmp_path), "", "c1")
+
+    def test_series_under_its_own_name_is_still_ingested_by_job_id(self, tmp_path):
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        os.symlink("/nonexistent", str(spool / "4242.c1.tsv"))
+        fd, path = sampler.open_series(str(spool), "4242", "c1")
+        os.close(fd)
+        assert profile.split_name(path)[0] == "4242"
+
+    def test_run_with_a_bad_job_id_does_nothing(self, tmp_path):
+        args = sampler.build_parser().parse_args(["--spool", str(tmp_path), "--job", "../x"])
+        assert sampler.run(args, {"SLURMD_NODENAME": "c1"}) == 0
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestSeveralNodes:

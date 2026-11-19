@@ -572,11 +572,12 @@ def cmd_submit(args: argparse.Namespace, cfg: Config) -> int:
 
 def _emit(text: str, out: Optional[str] = None) -> None:
     """Print a report, or write it to ``out`` and say so on stderr."""
+    text = text if text.endswith("\n") else text + "\n"
     if not out:
-        print(text)
+        sys.stdout.write(text)  # exactly one final newline: CSV output ends with its last row
         return
     with open(out, "w") as handle:
-        handle.write(text if text.endswith("\n") else text + "\n")
+        handle.write(text)
     _err("wrote %s" % out)
 
 
@@ -787,7 +788,8 @@ def cmd_plot(args: argparse.Namespace, cfg: Config) -> int:
             _err("  " + path)
         return EXIT_ERROR
     try:
-        out = plotter.plot_job(job, plotter.load(paths), args.out or plotter.default_name(job))
+        series = plotter.load(paths, owner=job.get("user"))
+        out = plotter.plot_job(job, series, args.out or plotter.default_name(job))
     except (plotter.PlotError, OSError) as exc:
         _err("hpg plot: %s" % exc)
         return EXIT_ERROR

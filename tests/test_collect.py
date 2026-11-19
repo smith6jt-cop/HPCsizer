@@ -410,5 +410,89 @@ class TestCoverage:
         assert collect.coverage(cfg, now=NOW)["available"] is False
 
 
+# A sacct that behaves like the real one where it matters here: it prints the
+# columns named with -o, in that order, and refuses a field it does not have.
+FIELD_AWARE_SACCT = r"""#!%s
+import json, os, sys
+folder = os.environ["STUB_DIR"]
+have = json.load(open(os.path.join(folder, "have.json")))
+args = sys.argv[1:]
+if args[:1] == ["--helpformat"]:
+    if have.get("help") is None:
+        sys.exit(1)
+    print(" ".join(have["help"]))
+    sys.exit(0)
+with open(os.path.join(folder, "sacct.calls"), "a") as log:
+    log.write("sacct " + " ".join(args) + "\n")
+fields = args[args.index("-o") + 1].split(",")
+for name in fields:
+    if name not in have["fields"]:
+        sys.stderr.write('sacct: error: Invalid field requested: "%%s"\n' %% name)
+        sys.exit(1)
+sep = [a for a in args if a.startswith("--delimiter=")][0].split("=", 1)[1]
+for row in json.load(open(os.path.join(folder, "rows.json"))):
+    sys.stdout.write(sep.join(row[name] for name in fields) + sep + "\n")
+"""
+
+
+class TestOtherSlurmVersions:
+    """Slurm 23.11 has no Restarts field, for one: sacct refuses a query that names it."""
+
+    OLD = tuple(name for name in FIELDS if name not in ("Restarts", "SubmitLine"))
+
+    def install(self, stubs, rows, fields, helpformat="same"):
+        import json
+        import sys
+
+        stubs.install("sacct", FIELD_AWARE_SACCT % sys.executable)
+        listed = list(fields) if helpformat == "same" else helpformat
+        (stubs.dir / "have.json").write_text(json.dumps({"fields": list(fields), "help": listed}))
+        (stubs.dir / "rows.json").write_text(json.dumps(rows))
+
+    def test_fields_this_sacct_lacks_are_not_asked_for(self, cfg, stubs):
+        self.install(stubs, simple_job(1, submit=NOW - 3600, total_cpu="00:10:00"), self.OLD)
+        messages = []
+        stats = collect.harvest(cfg, now=NOW, log=messages.append)
+        assert stats["n_inserted"] == 1
+        asked = stubs.sacct_calls()[0].split(" -o ")[1].split(",")
+        assert asked == list(self.OLD)
+        assert any("no field Restarts, SubmitLine; stored as unknown" in m for m in messages)
+        job = stored(cfg)["1"]
+        assert job["restarts"] is None and job["submit_line"] is None
+        assert job["cpu_sec"] == 600 and job["state"] == "COMPLETED", "the rest is collected"
+
+    def test_everything_is_asked_for_where_sacct_has_it(self, cfg, stubs):
+        self.install(stubs, simple_job(1, submit=NOW - 3600), FIELDS)
+        messages = []
+        assert collect.harvest(cfg, now=NOW, log=messages.append)["n_inserted"] == 1
+        assert stubs.sacct_calls()[0].split(" -o ")[1].split(",") == list(FIELDS)
+        assert not any("no field" in m for m in messages)
+        assert stored(cfg)["1"]["submit_line"]
+
+    def test_a_sacct_that_cannot_list_its_fields_is_asked_for_everything(self, cfg, stubs):
+        self.install(stubs, simple_job(1, submit=NOW - 3600), FIELDS, helpformat=None)
+        assert collect.harvest(cfg, now=NOW, log=quiet)["n_inserted"] == 1
+        assert stubs.sacct_calls()[0].split(" -o ")[1].split(",") == list(FIELDS)
+
+    def test_refusal_that_could_not_be_foreseen_fails_loudly(self, cfg, stubs):
+        self.install(stubs, simple_job(1, submit=NOW - 3600), self.OLD, helpformat=None)
+        with pytest.raises(collect.HarvestError, match='Invalid field requested: "Restarts"'):
+            collect.harvest(cfg, now=NOW, log=quiet)
+
+    def test_queue_and_preflight_ask_for_the_same_fields(self, cfg, stubs):
+        from lib import health, queue
+
+        rows = simple_job(1, submit=NOW - 3600)
+        rows.append(job_row(2, state="PENDING", started=False, ended=False, submit=NOW - 60))
+        self.install(stubs, rows, self.OLD)
+        (open_job,) = queue.fetch_open(cfg)
+        assert open_job["job_id_raw"] == 2 and open_job["submit_line"] is None
+        checks = {c["check"]: c for c in health.preflight(cfg, now=NOW)}
+        assert checks["sacct fields"]["status"] == "WARN"
+        assert "Restarts, SubmitLine" in checks["sacct fields"]["detail"]
+        assert checks["sacct query"]["status"] == "PASS"
+        assert checks["unfinished jobs query"]["status"] == "PASS"
+
+
 def test_field_list_matches_the_fixture():
     assert len(job_row(1)) == len(FIELDS)

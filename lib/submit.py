@@ -162,18 +162,52 @@ def job_id_from(stdout: str) -> Optional[str]:
 
 
 def write_context(cfg: Config, job_id: str, payload: Dict[str, Any]) -> Optional[str]:
-    """Record what was submitted, for the harvester. Returns the path, or None if it cannot."""
-    folder = os.path.join(cfg.spool_dir, "submit")
-    path = os.path.join(folder, "%s.json" % job_id)
+    """Record what was submitted, for the harvester. Returns the path, or None if it cannot.
+
+    The folder is writable by the whole group, so whatever already sits under
+    the job's name is not trusted: the record is written to a new file, created
+    exclusively and without following links, and renamed into place. A link
+    that another member left there is replaced or, in a sticky folder, makes
+    the rename fail -- its target is never opened. The folder itself must be a
+    real directory of the spool's owner; only the owner's harvest creates it.
+    """
+    if not str(job_id).isdigit():
+        return None
+    name = "%s.json" % job_id
+    data = json.dumps(payload, sort_keys=True).encode("utf-8")
+    spool_fd = folder_fd = fd = -1
+    tmp: Optional[str] = None
     try:
-        os.makedirs(folder, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
-        with os.fdopen(fd, "w") as handle:
-            os.fchmod(handle.fileno(), 0o640)
-            json.dump(payload, handle, sort_keys=True)
+        spool_fd = os.open(cfg.spool_dir, os.O_RDONLY | os.O_DIRECTORY)
+        folder_fd = os.open("submit", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=spool_fd)
+        if os.fstat(folder_fd).st_uid != os.fstat(spool_fd).st_uid:
+            return None
+        tmp = ".%s.%d.%s.tmp" % (job_id, os.getpid(), os.urandom(4).hex())
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=folder_fd
+        )
+        os.fchmod(fd, 0o640)  # whatever the umask: the harvester must be able to read it
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.close(fd)
+        fd = -1
+        os.replace(tmp, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        tmp = None
     except OSError:
         return None
-    return path
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if tmp is not None and folder_fd >= 0:
+            try:
+                os.unlink(tmp, dir_fd=folder_fd)
+            except OSError:
+                pass
+        for handle in (folder_fd, spool_fd):
+            if handle >= 0:
+                os.close(handle)
+    return os.path.join(cfg.spool_dir, "submit", name)
 
 
 class Plan:

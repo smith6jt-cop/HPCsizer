@@ -285,6 +285,20 @@ def detect_language(text: str) -> str:
     return "unknown"
 
 
+_SCONTROL_SHOW_JOB = re.compile(r"\bscontrol\s+(?:-\S+\s+)*show\s+job(?:id)?\b", re.IGNORECASE)
+
+
+def looks_up_its_own_path(text: str) -> bool:
+    """True when a script asks Slurm where it was submitted from.
+
+    A job script runs from a copy in slurmd's spool, so one that needs its own
+    location commonly reads the ``Command=`` field of ``scontrol show job``.
+    For a job submitted through ``hpg submit`` that field names the temporary
+    copy that carries the sampler line, which no longer exists.
+    """
+    return bool(_SCONTROL_SHOW_JOB.search(text)) and "Command" in text
+
+
 def is_shell_script(text: str) -> bool:
     """True when the script is run by sh or bash, the only kind a sampler line can be added to."""
     first = text.splitlines()[0] if text else ""

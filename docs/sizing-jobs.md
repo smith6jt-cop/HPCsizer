@@ -225,6 +225,12 @@ your job's exit status, and nothing runs when the job ends. `--no-profile`
 leaves it out. Scripts that are not run by `sh` or `bash` are submitted
 unprofiled, with a note.
 
+Because the job runs from that temporary copy, `scontrol show job` reports the
+copy's path as the job's `Command`, and the copy is gone once the job has been
+submitted. A script that reads its own location from that field is therefore
+submitted unprofiled, with a note; use `$SLURM_SUBMIT_DIR` in such a script to
+have it profiled.
+
 ```bash
 hpg plot 51000040
 ```

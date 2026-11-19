@@ -255,6 +255,26 @@ class TestPrepare:
         assert not plan.profiled and plan.final == ["job.py"]
         assert any("not run by sh or bash" in note for note in plan.notes)
 
+    def test_script_that_looks_up_its_own_path_is_submitted_unprofiled(self, conf, work):
+        """Slurm records the temporary copy as the job's Command; such a script would be
+        sent to a folder that no longer exists."""
+        (work / "self.sh").write_text(
+            "#!/bin/bash\n#SBATCH -c 2\n"
+            "HERE=$(dirname $(scontrol show job $SLURM_JOB_ID | awk -F= '/Command=/{print $2}'))\n"
+            "cd $HERE && ./run\n"
+        )
+        plan = submit.prepare(["self.sh"], conf)
+        assert not plan.profiled and plan.final == ["self.sh"] and plan.tmpdir is None
+        assert any("reads its own path from 'scontrol show job'" in note for note in plan.notes)
+
+    def test_script_that_only_prints_its_job_record_is_profiled(self, conf, work):
+        (work / "log.sh").write_text("#!/bin/bash\nscontrol show job $SLURM_JOB_ID\n./run\n")
+        plan = submit.prepare(["log.sh"], conf)
+        try:
+            assert plan.profiled
+        finally:
+            plan.cleanup()
+
     def test_without_a_spool_the_job_is_submitted_unchanged(self, conf, work):
         shutil.rmtree(conf.spool_dir)
         plan = submit.prepare(["run_mplx.sh"], conf)

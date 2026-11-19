@@ -225,6 +225,12 @@ class TestJob:
             "peak 12 MB of 4 GB requested (0%) for 2.5 min: "
         )
 
+    def test_cpu_time_of_a_job_under_a_minute_is_not_called_unmeasured(self, conf):
+        job = annotated(conf, [run(1, elapsed_sec=40, cpu_sec=39.7, alloc_cpus=2)])[0]
+        text = jobview.render_job(job, [])
+        line = next(ln for ln in text.splitlines() if ln.startswith("CPUs"))
+        assert "not averaged" in line and "the job ran under a minute" in line
+
     def test_unmeasured_values_say_so(self, conf):
         job = annotated(
             conf, [run(1, state="TIMEOUT", elapsed_sec=40, peak_mem_bytes=0, cpu_sec=0.01)]

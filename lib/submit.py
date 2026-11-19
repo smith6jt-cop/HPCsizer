@@ -289,6 +289,11 @@ def prepare(
                 text = analyzer.read_text(sub.script_path)
                 if text is None:
                     raise OSError("cannot read %s" % sub.script_path)
+                if analyzer.looks_up_its_own_path(text):
+                    raise OSError(
+                        "the script reads its own path from 'scontrol show job', "
+                        "which would name the temporary copy that carries the sampler"
+                    )
                 plan.tmpdir = tempfile.mkdtemp(prefix="hpg-")
                 copy = os.path.join(plan.tmpdir, os.path.basename(sub.script_path))
                 with open(copy, "w") as handle:

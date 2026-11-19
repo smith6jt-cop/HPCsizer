@@ -452,10 +452,10 @@ def render_job(
         [
             "CPUs",
             fmt_int(m["cores_alloc"]),
-            "not measured"
+            ("not averaged" if m["cpu_source"] else "not measured")
             if m["cores_used"] is None
             else "%s cores (%s)" % (fmt_num(m["cores_used"]), fmt_pct(m["cpu_eff"])),
-            ""
+            ("the job ran under a minute" if m["cpu_source"] else "")
             if m["cores_used"] is None
             else "average; CPU time from %s%s"
             % (

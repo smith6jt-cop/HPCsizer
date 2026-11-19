@@ -165,10 +165,10 @@ A value is *unknown* when it was not measured — never zero.
 | Metric | Definition | Unknown when |
 |---|---|---|
 | `mem_req_gb` | `req_mem_mb` / 1024 | no request stored |
-| `mem_used_gb` | the profile's peak when a cgroup profile covers ≥ 90% of the run; otherwise the larger of the profile's and accounting's peak | no profile, and the job ran less than two accounting samples (2 × 60 s) |
+| `mem_used_gb` | the larger of the profile's and accounting's peak: each can only miss something. Exception: where accounting's peak is a sum over steps that ran side by side or an estimate over tasks (`mem_src` `overlap_sum`, `ntasks_est`), which can overstate, a cgroup profile that covers ≥ 90% of the run replaces it | no profile, and the job ran less than two accounting samples (2 × 60 s) |
 | `mem_eff` | used / requested | either is unknown |
 | `cores_alloc` | `alloc_cpus` (else `req_cpus`) | |
-| `cores_used` | CPU seconds / elapsed; CPU seconds chosen like memory | the job ran under 60 s; or it was killed and neither a polled value nor a profile exists |
+| `cores_used` | CPU seconds / elapsed; CPU seconds are the larger of the profile's and accounting's | the job ran under 60 s; or it was killed and neither a polled value nor a profile exists |
 | `cpu_eff` | used / allocated | |
 | `time_eff` | elapsed / limit | no limit |
 | `gpu_util` | busiest moment, profile first | not recorded |

@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from lib import metrics, recommender
 from lib.config import Config
 from lib.fmt import (
+    csv_text,
     fmt_date,
     fmt_gb,
     fmt_hours,
@@ -655,10 +656,12 @@ def family_csv_rows(rep: Dict[str, Any]) -> List[List[Any]]:
 
 
 def to_csv(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+    """CSV with one physical line per row, and no text cell a spreadsheet would evaluate."""
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(headers)
-    writer.writerows(rows)
+    for row in rows:
+        writer.writerow([csv_text(cell) if isinstance(cell, str) else cell for cell in row])
     return buffer.getvalue()
 
 

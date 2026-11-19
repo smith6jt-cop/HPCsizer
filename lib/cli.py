@@ -572,11 +572,12 @@ def cmd_submit(args: argparse.Namespace, cfg: Config) -> int:
 
 def _emit(text: str, out: Optional[str] = None) -> None:
     """Print a report, or write it to ``out`` and say so on stderr."""
+    text = text if text.endswith("\n") else text + "\n"
     if not out:
-        print(text)
+        sys.stdout.write(text)  # exactly one final newline: CSV output ends with its last row
         return
     with open(out, "w") as handle:
-        handle.write(text if text.endswith("\n") else text + "\n")
+        handle.write(text)
     _err("wrote %s" % out)
 
 

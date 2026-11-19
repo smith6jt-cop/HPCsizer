@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from lib import sbatch_opts
 from lib.config import Config
+from lib.fmt import clean
 
 _OOD_MARK = "sys/dashboard/"
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -254,8 +255,34 @@ def classify(job: Mapping[str, Any], cfg: Config) -> Dict[str, Any]:
     }
 
 
+# Text that whoever submits a job writes, or that comes from inside the job.
+_TEXT_FIELDS = (
+    "job_name",
+    "submit_line",
+    "work_dir",
+    "node_list",
+    "state_raw",
+    "user",
+    "account",
+    "partition",
+    "qos",
+    "mon_top_comm",
+)
+
+
 def annotate(jobs: Sequence[Dict[str, Any]], cfg: Config) -> Sequence[Dict[str, Any]]:
-    """Add the classification keys to each job dict in place."""
+    """Add the classification keys to each job dict in place.
+
+    This is where stored rows become what the reports work with, so it is also
+    where their free text is made safe to show (``fmt.clean``): once, before a
+    family name is derived from it, so that every report, table and suggested
+    command sees the same harmless spelling. The database keeps what Slurm
+    reported.
+    """
     for job in jobs:
+        for name in _TEXT_FIELDS:
+            value = job.get(name)
+            if isinstance(value, str):
+                job[name] = clean(value)
         job.update(classify(job, cfg))
     return jobs

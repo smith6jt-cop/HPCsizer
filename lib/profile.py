@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from lib import db
 from lib.config import Config
-from lib.fmt import fmt_bytes, fmt_num, fmt_pct
+from lib.fmt import clean, fmt_bytes, fmt_num, fmt_pct
 
 Row = Dict[str, Any]
 Series = List[Tuple[float, float]]
@@ -883,7 +883,7 @@ def describe(summary: Dict[str, Any]) -> List[str]:
             lines.append(
                 "%s: peak memory %s, %s cores on average"
                 % (
-                    node.get("node"),
+                    clean(node.get("node")),
                     fmt_bytes(node.get("peak_mem_bytes")),
                     fmt_num(node.get("avg_cores")),
                 )

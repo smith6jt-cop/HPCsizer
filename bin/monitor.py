@@ -68,6 +68,7 @@ MAX_PIDS = 512
 MAX_ROWS_FAST = 20000  # beyond this, sample every five minutes
 JOB_COMPONENT = re.compile(r"^job_(\d+)$")
 UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]")
+UNSAFE_IN_COMM = re.compile(r"[^A-Za-z0-9_.+@/=-]")
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 _stop = []
@@ -190,9 +191,10 @@ def describe_processes(proc_root, pids):
             rd += r
             wr += w or 0
     largest.sort(reverse=True)
+    # A process names itself: keep only characters that cannot break the line
+    # this goes into, or do anything to a terminal the name is later shown on.
     top = ",".join(
-        "%s:%d"
-        % (name.replace(",", "_").replace(":", "_").replace("\t", " "), rss // (1024 * 1024))
+        "%s:%d" % (UNSAFE_IN_COMM.sub("_", name) or "?", rss // (1024 * 1024))
         for rss, name in largest[:3]
         if rss > 0
     )

@@ -106,9 +106,10 @@ class TestStatus:
         it must not be taken off the jobs that were read again unchanged."""
         from sacct_fixture import step_row
 
-        env.sacct_default(recent(1))
+        first = recent(1)  # built once: a job is identified by its id and its submit time
+        env.sacct_default(first)
         hpg("harvest")
-        env.sacct_default(recent(1) + [step_row(999, "batch")] + recent(2))
+        env.sacct_default(first + [step_row(999, "batch")] + recent(2))
         hpg("harvest")
         capsys.readouterr()
         hpg("status", "--no-sacct")
